@@ -25,6 +25,33 @@ namespace oceanbase
 namespace common 
 {
 
+// Every vector in one embedding response must be a valid vector of the same dimension.
+static int check_embedding_list(const ObJsonArray &embeddings)
+{
+  int ret = OB_SUCCESS;
+  int64_t dimension = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < embeddings.element_count(); i++) {
+    const ObJsonNode *embedding = embeddings.get_value(i);
+    if (OB_FAIL(ObAIFuncModel::check_embedding_vector(embedding, dimension))) {
+      ret = OB_INVALID_DATA;
+      LOG_WARN("invalid embedding in response", K(ret), K(i), K(dimension));
+    } else {
+      dimension = static_cast<const ObJsonArray *>(embedding)->element_count();
+    }
+  }
+  return ret;
+}
+
+// A completion is only valid when the provider returned non-empty generated text.
+static int check_completion_text(const ObIJsonBase *text)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(text) || text->json_type() != ObJsonNodeType::J_STRING || 0 == text->get_data_length()) {
+    ret = OB_INVALID_DATA;
+  }
+  return ret;
+}
+
 int ObOpenAIUtils::get_header(common::ObIAllocator &allocator,
                               ObString &api_key,
                               common::ObArray<ObString> &headers) 
@@ -174,6 +201,7 @@ int ObOpenAIUtils::ObOpenAIComplete::parse_output(common::ObIAllocator &allocato
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
     } else if (hit.size() == 0) {
       ret = OB_INVALID_DATA;
+    } else if (OB_FAIL(check_completion_text(hit[0]))) {
     } else {
       result = hit[0];
     }
@@ -278,7 +306,9 @@ int ObOpenAIUtils::ObOpenAIEmbed::parse_output(common::ObIAllocator &allocator,
         if (OB_FAIL(result_array->append(ordered.at(i)))) {
         }
       }
-      if (OB_SUCC(ret)) {
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(check_embedding_list(*result_array))) {
+      } else {
         result = result_array;
       }
     }
@@ -373,6 +403,7 @@ int ObOllamaUtils::ObOllamaComplete::parse_output(common::ObIAllocator &allocato
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
     } else if (hit.size() == 0) {
       ret = OB_INVALID_DATA;
+    } else if (OB_FAIL(check_completion_text(hit[0]))) {
     } else {
       result = hit[0];
     }
@@ -432,6 +463,7 @@ int ObOllamaUtils::ObOllamaEmbed::parse_output(common::ObIAllocator &allocator,
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
     } else if (hit.size() == 0 || hit[0]->json_type() != ObJsonNodeType::J_ARRAY) {
       ret = OB_INVALID_DATA;
+    } else if (OB_FAIL(check_embedding_list(*static_cast<ObJsonArray *>(hit[0])))) {
     } else {
       result = hit[0];
     }
