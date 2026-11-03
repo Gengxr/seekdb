@@ -42,23 +42,33 @@ public:
   virtual bool need_rt_ctx() const override { return true; }
  
 private:
-  static int inner_eval_ai_rerank(common::ObIAllocator &allocator, 
-                                  const common::ObAIFuncExprInfo &info, 
-                                  const share::ObAiModelEndpointInfo &endpoint_info,
-                                  common::ObArray<common::ObString> &header_array, 
-                                  common::ObString &query, 
-                                  common::ObJsonArray *document_array, 
-                                  common::ObJsonArray *&result_array);
-  
-  static int eval_ai_rerank_with_doc_key(const ObExpr &expr, ObEvalCtx &ctx, common::ObIAllocator &allocator,
-                                         common::ObString &model_id, common::ObString &query, common::ObJsonArray *document_array,
-                                         common::ObString &doc_key, const common::ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info, ObDatum &res);
-  static int get_doc_array_from_documents_array_with_key(ObIAllocator &allocator, ObJsonArray *document_object_array, ObString &doc_key, ObJsonArray *&doc_array);
-  static int sort_document_array_by_model_result(common::ObIAllocator &allocator, common::ObJsonArray *document_array, common::ObJsonArray *model_result_array, common::ObJsonArray *&sorted_document_array);
+  struct RerankScore
+  {
+    RerankScore() : index_(0), score_(0) {}
+    RerankScore(const int64_t index, const double score) : index_(index), score_(score) {}
+    TO_STRING_KV(K_(index), K_(score));
+    int64_t index_;   // position in the caller's document array
+    double score_;
+  };
+  static int get_document_texts(common::ObIAllocator &allocator, common::ObJsonArray *document_array,
+                                const bool has_doc_key, const common::ObString &doc_key,
+                                common::ObJsonArray *&text_array);
+  static int rerank_in_batches(common::ObIAllocator &allocator,
+                               const common::ObAIFuncExprInfo &info,
+                               const share::ObAiModelEndpointInfo &endpoint_info,
+                               common::ObString &query,
+                               common::ObJsonArray *text_array,
+                               common::ObArray<RerankScore> &scores);
+  static int collect_batch_scores(common::ObJsonArray *batch_result, const int64_t base,
+                                  const int64_t batch_count, common::ObArray<RerankScore> &scores);
+  static bool is_numeric_json(const common::ObJsonNodeType type);
+  static int build_result(common::ObIAllocator &allocator, common::ObJsonArray *document_array,
+                          const bool has_doc_key, const common::ObArray<RerankScore> &scores,
+                          common::ObJsonArray *&result_array);
   static int construct_config_json(common::ObIAllocator &allocator, int64_t top_k, int64_t return_doc, common::ObJsonObject *&config_json);
   static int construct_batch_document_array(common::ObIAllocator &allocator, common::ObJsonArray *document_array, int64_t start_idx, int64_t end_idx, common::ObJsonArray *&batch_document_array);
-  static int batch_result_add_base(common::ObIAllocator &allocator, common::ObJsonArray *array, int64_t start_idx);
-  static int compact_json_array_by_key(common::ObIAllocator &allocator, common::ObJsonArray *array1, common::ObJsonArray *array2, common::ObString &score_key, common::ObJsonArray *&compact_array);
+  // Upper bound of documents scored by one rerank request.
+  static constexpr int64_t MAX_BATCH_DOCUMENTS = 20;
   static constexpr int MODEL_IDX = 0;
   static constexpr int QUERY_IDX = 1;
   static constexpr int DOCUMENTS_IDX = 2;

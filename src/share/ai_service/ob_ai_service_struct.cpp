@@ -37,6 +37,7 @@ const char *VALID_PROVIDERS[] = {
   "SILICONFLOW",
   "COHERE",
   "HUNYUAN-OPENAI",
+  "OLLAMA",
   "OPENAI"
 };
 
@@ -80,6 +81,7 @@ int ObAiModelEndpointInfo::deep_copy(
   int ret = OB_SUCCESS;
   reset();
   endpoint_id_ = other.endpoint_id_;
+  max_concurrency_ = other.max_concurrency_;
   if (OB_FAIL(ob_write_string(allocator, other.name_, name_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.scope_, scope_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.ai_model_name_, ai_model_name_))) {
@@ -112,16 +114,17 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty()) {
-    ret = OB_AI_FUNC_PARAM_EMPTY;
-    LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
-    LOG_WARN("access_key is empty", K(ret), K(*this));
   } else if (provider_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("provider"), "provider");
   } else if (!is_valid_provider(provider_)) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("provider"), "provider");
+  } else if (access_key_.empty() && !is_access_key_optional(provider_)) {
+    // Local providers such as Ollama do not authenticate requests.
+    ret = OB_AI_FUNC_PARAM_EMPTY;
+    LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
+    LOG_WARN("access_key is empty", K(ret), K(*this));
   } else if (!parameters_.empty()) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("parameters"), "parameters");
@@ -133,6 +136,11 @@ int ObAiModelEndpointInfo::check_valid() const
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("response_transform_fn"), "response_transform_fn");
   }
   return ret;
+}
+
+bool ObAiModelEndpointInfo::is_access_key_optional(const ObString &provider)
+{
+  return 0 == provider.case_compare("ollama");
 }
 
 bool ObAiModelEndpointInfo::is_valid_provider(const ObString &provider)
@@ -156,6 +164,23 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
     ObJsonObjPair elem;
     if (OB_FAIL(iter.get_elem(elem))) {
     } else {
+      if (elem.first.case_compare("max_concurrency") == 0) {
+        // An integer request-concurrency limit; numeric strings are rejected.
+        int64_t value = 0;
+        if (elem.second->json_type() == ObJsonNodeType::J_INT) {
+          value = elem.second->get_int();
+        } else if (elem.second->json_type() == ObJsonNodeType::J_UINT
+                   && elem.second->get_uint() <= static_cast<uint64_t>(MAX_MAX_CONCURRENCY)) {
+          value = static_cast<int64_t>(elem.second->get_uint());
+        }
+        if (value < MIN_MAX_CONCURRENCY || value > MAX_MAX_CONCURRENCY) {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
+          LOG_WARN("invalid max_concurrency", K(ret), K(elem.second->json_type()));
+        } else {
+          max_concurrency_ = value;
+        }
+      } else
       EXTRACT_JSON_ELEM_STR("scope", scope_)
       EXTRACT_JSON_ELEM_STR("ai_model_name", ai_model_name_)
       EXTRACT_JSON_ELEM_STR("url", url_)

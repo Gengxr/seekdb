@@ -360,6 +360,8 @@ public:
    int call_dense_embedding_vector_v2(ObArray<ObString> &contents, ObJsonObject *config, ObArray<ObString> &results);
    // rerank
    int call_rerank(ObString &query, ObJsonArray *contents, ObJsonArray *&results);
+   // Validate one returned embedding: a non-empty numeric array with the expected dimension.
+   static int check_embedding_vector(const ObJsonNode *embedding, const int64_t expected_dimension);
  private:
    bool is_completion_type() {return info_.type_ == share::EndpointType::COMPLETION;}
    bool is_dense_embedding_type() {return info_.type_ == share::EndpointType::DENSE_EMBEDDING;}
@@ -378,6 +380,9 @@ public:
   virtual ~ObAIFuncPromptObjectUtils() {}
   static bool is_valid_prompt_object(ObJsonObject* prompt_object);
   static int replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str);
+  static int render_prompt_object(ObIAllocator &allocator, ObJsonObject *prompt_object,
+                                  const int64_t depth, ObStringBuffer &result);
+  static constexpr int64_t MAX_PROMPT_NESTING_DEPTH = 16;
   static int construct_prompt_object(ObIAllocator &allocator, ObString &template_str, ObJsonArray *args_array, ObJsonObject *&prompt_object);
   static constexpr char prompt_template_key[20] = "template";
   static constexpr char prompt_args_key[20] = "args";

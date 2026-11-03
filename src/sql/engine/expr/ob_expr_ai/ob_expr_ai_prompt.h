@@ -33,6 +33,8 @@ public:
   virtual int calc_result_typeN(ObExprResType &type, ObExprResType *types_array,
                               int64_t param_num,
                               common::ObExprTypeCtx &type_ctx) const override;
+  static bool is_text_like(const ObObjType type);
+  static void set_text_calc_type(ObExprResType &type);
   static int eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res);
   virtual int cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
                   ObExpr &rt_expr) const override;
