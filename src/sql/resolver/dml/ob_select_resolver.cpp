@@ -1640,6 +1640,10 @@ int ObSelectResolver::expand_target_list(
   if (table_item.is_basic_table()) {
     if (OB_FAIL(resolve_all_basic_table_columns(table_item, false, &column_items))) {
     }
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_items.count(); ++i) {
+      if (OB_FAIL(check_ai_column_read(table_item, column_items.at(i).column_name_))) {
+      }
+    }
   } else if (table_item.is_generated_table() ||
              table_item.is_temp_table() ||
              table_item.is_lateral_table()) {

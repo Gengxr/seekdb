@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_CG
 #include "ob_dml_cg_service.h"
+#include "sql/ai_column/ob_ai_column_util.h"
 #include "sql/code_generator/ob_static_engine_cg.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "sql/parser/ob_parser.h"
@@ -2153,6 +2154,21 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogDelUpd &op,
   if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
     //add foreign key
     if (OB_FAIL(convert_foreign_keys(op, index_dml_info, dml_base_ctdef))) {
+    }
+  }
+  if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
+    ObSqlSchemaGuard *schema_guard = NULL;
+    const ObTableSchema *table_schema = NULL;
+    if (OB_ISNULL(op.get_plan())
+        || OB_ISNULL(schema_guard = op.get_plan()->get_optimizer_context().get_sql_schema_guard())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(schema_guard->get_table_schema(index_dml_info.ref_table_id_, table_schema))) {
+    } else if (OB_NOT_NULL(table_schema) && table_schema->is_user_table()) {
+      dml_base_ctdef.has_ai_column_ = ObAIColumnUtil::has_ai_column(*table_schema);
+      if (dml_base_ctdef.has_ai_column_) {
+        // task rows are maintained by nested SQL in the same transaction
+        cg_.phy_plan_->set_has_nested_sql(true);
+      }
     }
   }
   // Only enable when pl_static_engine is enabled that mysqltest will enable

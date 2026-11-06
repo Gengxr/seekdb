@@ -235,9 +235,23 @@ protected:
   int add_select_item_func(ObSelectStmt &select_stmt, ColumnItem &col);
   int select_items_is_pk(const ObSelectStmt& select_stmt, bool &has_pk);
 
+  // AI columns: a change of a dependency or primary key column invalidates the result.
+  int resolve_ai_column_assignments(common::ObIArray<ObTableAssignment> &table_assigns,
+                                    const int64_t assign_idx,
+                                    const TableItem &table_item,
+                                    const share::schema::ObTableSchema &table_schema);
+  int add_ai_column_assignment(common::ObIArray<ObTableAssignment> &table_assigns,
+                               const TableItem &table_item,
+                               const share::schema::ObTableSchema &table_schema,
+                               const common::ObString &column_name,
+                               ObRawExpr *value);
+  // One request id per changed row, shared by all AI columns invalidated by the change.
+  int get_ai_request_expr(ObRawExpr *&expr);
+  int is_ai_result_column(const TableItem &table_item, const common::ObString &column_name, bool &is_ai);
 private:
   common::hash::ObPlacementHashSet<uint64_t, 4229> insert_column_ids_;
   bool is_column_specify_;
+  ObRawExpr *ai_request_expr_;
 protected:
   bool is_resolve_insert_update_;
 };

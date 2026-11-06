@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "ob_ddl_resolver.h"
+#include "sql/ai_column/ob_ai_column_util.h"
 #include "data_plane/blocksstable/ob_index_block_util.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -2286,6 +2287,14 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
       {
         break;
       }
+      case T_AI_COLUMN: {
+        AIColumnDef def;
+        def.node_ = attr_node;
+        if (OB_FAIL(ob_write_string(*allocator_, column.get_column_name_str(), def.column_name_))) {
+        } else if (OB_FAIL(ai_column_defs_.push_back(def))) {
+        }
+        break;
+      }
       default:  // won't be here
         ret = OB_ERR_PARSER_SYNTAX;
         SQL_RESV_LOG(WARN, "Wrong column attribute", K(ret), K(attr_node->type_));
@@ -2334,6 +2343,157 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
           SQL_RESV_LOG(WARN, "wrong column type for auto_increment", K(ret));
         }
       }
+    }
+  }
+  return ret;
+}
+
+bool ObDDLResolver::is_ai_column_in_definition(const ObString &column_name) const
+{
+  bool found = false;
+  for (int64_t i = 0; !found && i < ai_column_defs_.count(); ++i) {
+    found = (0 == ai_column_defs_.at(i).column_name_.case_compare(column_name));
+  }
+  return found;
+}
+
+int ObDDLResolver::resolve_ai_column_def(const AIColumnDef &def,
+                                         const ObColumnSchemaV2 &result_column,
+                                         const ObTableSchema &table_schema,
+                                         ObIArray<ObColumnSchemaV2> &helpers)
+{
+  int ret = OB_SUCCESS;
+  ObAIColumnSpec spec;
+  const ParseNode *expr_node = nullptr;
+  const ParseNode *option_list = nullptr;
+  spec.sync_mode_ = ObString::make_string(ObAIColumnUtil::SYNC_MODE_ASYNC);
+  spec.max_retries_ = ObAIColumnUtil::DEFAULT_MAX_RETRIES;
+  if (OB_ISNULL(def.node_) || def.node_->num_child_ != 2
+      || OB_ISNULL(expr_node = def.node_->children_[0]) || OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid AI column node", K(ret), K(def));
+  } else if (OB_FAIL(ObAIColumnUtil::parse_expr(*allocator_,
+                                                ObString(expr_node->str_len_, expr_node->str_value_),
+                                                spec))) {
+  } else {
+    option_list = def.node_->children_[1];
+  }
+  // WITH (sync_mode = 'async', max_retries = N)
+  for (int64_t i = 0; OB_SUCC(ret) && OB_NOT_NULL(option_list) && i < option_list->num_child_; ++i) {
+    const ParseNode *option = option_list->children_[i];
+    if (OB_ISNULL(option) || option->num_child_ != 2 || OB_ISNULL(option->children_[0])
+        || OB_ISNULL(option->children_[1])) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const ObString name(option->children_[0]->str_len_, option->children_[0]->str_value_);
+      const ParseNode *value = option->children_[1];
+      if (0 == name.case_compare("sync_mode")) {
+        const ObString mode(value->str_len_, value->str_value_);
+        if (T_INT == value->type_ || 0 != mode.case_compare(ObAIColumnUtil::SYNC_MODE_ASYNC)) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column sync_mode other than 'async'");
+        }
+      } else if (0 == name.case_compare("max_retries")) {
+        if (T_INT != value->type_ || value->value_ < 0
+            || value->value_ > ObAIColumnUtil::MAX_MAX_RETRIES) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "AI column max_retries, expect an integer in [0, 100]");
+        } else {
+          spec.max_retries_ = value->value_;
+        }
+      } else {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "this AI column option");
+      }
+    }
+  }
+  // The result type must fit the function.
+  if (OB_FAIL(ret)) {
+  } else if (0 == spec.function_name_.case_compare(ObAIColumnUtil::FUNC_EMBED)) {
+    int64_t dim = 0;
+    if (!result_column.is_collection()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI_EMBED AI column of a non-vector type");
+    } else if (OB_FAIL(ObVectorIndexUtil::get_vector_dim_from_extend_type_info(
+                   result_column.get_extended_type_info(), dim))) {
+    } else if (spec.args_.count() > 2) {
+      const ObString dim_arg = spec.args_.at(2).trim();
+      int64_t arg_dim = 0;
+      bool is_number = !dim_arg.empty();
+      for (int64_t i = 0; is_number && i < dim_arg.length(); ++i) {
+        is_number = (dim_arg.ptr()[i] >= '0' && dim_arg.ptr()[i] <= '9');
+        arg_dim = arg_dim * 10 + (dim_arg.ptr()[i] - '0');
+      }
+      if (is_number && arg_dim != dim) {
+        ret = OB_ERR_INVALID_VECTOR_DIM;
+        LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM, static_cast<uint32_t>(dim), static_cast<uint32_t>(arg_dim));
+      }
+    }
+  } else if (result_column.is_collection()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI_COMPLETE AI column of a vector type");
+  }
+  // Keep the identifiers that name columns; an AI column cannot depend on another AI column.
+  ObSEArray<ObString, 4> deps;
+  for (int64_t i = 0; OB_SUCC(ret) && i < spec.deps_.count(); ++i) {
+    const ObColumnSchemaV2 *dep_column = table_schema.get_column_schema(spec.deps_.at(i));
+    bool dep_is_ai = false;
+    bool duplicated = false;
+    if (OB_ISNULL(dep_column) || dep_column->is_hidden()) {
+      // keywords and other identifiers that are not columns of this table
+    } else if (0 == dep_column->get_column_name_str().case_compare(result_column.get_column_name_str())
+               || is_ai_column_in_definition(dep_column->get_column_name_str())) {
+      dep_is_ai = true;
+    } else if (OB_FAIL(ObAIColumnUtil::get_spec(*allocator_, table_schema,
+                                                dep_column->get_column_name_str(), dep_is_ai))) {
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && OB_NOT_NULL(dep_column) && j < deps.count(); ++j) {
+      duplicated = duplicated || (0 == deps.at(j).case_compare(dep_column->get_column_name_str()));
+    }
+    if (OB_FAIL(ret) || OB_ISNULL(dep_column) || dep_column->is_hidden() || duplicated) {
+    } else if (dep_is_ai) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("AI column depending on another AI column is not supported", K(ret), K(def));
+    } else if (OB_FAIL(deps.push_back(dep_column->get_column_name_str()))) {
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(spec.deps_.assign(deps))) {
+  }
+  // Hidden helper columns; the definition is kept as the comment of the spec column.
+  ObString definition;
+  if (OB_SUCC(ret) && OB_FAIL(ObAIColumnUtil::spec_to_json(*allocator_, spec, definition))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+    const char *prefix = (0 == i) ? ObAIColumnUtil::STATE_PREFIX
+                         : (1 == i) ? ObAIColumnUtil::REQUEST_PREFIX : ObAIColumnUtil::SPEC_PREFIX;
+    ObColumnSchemaV2 helper;
+    ObString helper_name;
+    ObObj default_value;
+    helper.set_nullable(true);
+    helper.set_is_hidden(true);
+    if (1 == i) {
+      helper.set_data_type(ObVarcharType);
+      helper.set_data_length(ObAIColumnUtil::REQUEST_ID_LENGTH);
+      helper.set_charset_type(CHARSET_UTF8MB4);
+      helper.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      default_value.set_null();
+    } else {
+      helper.set_data_type(ObIntType);
+      helper.set_accuracy(ObAccuracy::DDL_DEFAULT_ACCURACY[ObIntType]);
+      helper.set_charset_type(CHARSET_BINARY);
+      helper.set_collation_type(CS_TYPE_BINARY);
+      default_value.set_int(0 == i ? static_cast<int64_t>(AI_ROW_PENDING) : spec.version_);
+    }
+    if (OB_FAIL(ObAIColumnUtil::build_helper_name(*allocator_, prefix,
+                                                  result_column.get_column_name_str(), helper_name))) {
+    } else if (OB_NOT_NULL(table_schema.get_column_schema(helper_name))) {
+      ret = OB_ERR_COLUMN_DUPLICATE;
+      LOG_USER_ERROR(OB_ERR_COLUMN_DUPLICATE, helper_name.length(), helper_name.ptr());
+    } else if (OB_FAIL(helper.set_column_name(helper_name))) {
+    } else if (OB_FAIL(helper.set_cur_default_value(default_value, false))) {
+    } else if (OB_FAIL(helper.set_orig_default_value(default_value))) {
+    } else if (2 == i && OB_FAIL(helper.set_comment(definition))) {
+    } else if (OB_FAIL(helpers.push_back(helper))) {
     }
   }
   return ret;

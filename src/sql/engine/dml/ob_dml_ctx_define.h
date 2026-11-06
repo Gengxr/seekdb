@@ -438,6 +438,8 @@ public:
   bool reserved_advanced_trigger_;
   ObExpr *trans_info_expr_;
   bool is_vec_hnsw_index_vid_opt_;
+  // the table has AI columns whose generation tasks follow the modified rows
+  bool has_ai_column_;
 protected:
   ObDMLBaseCtDef(common::ObIAllocator &alloc,
                  ObDASDMLBaseCtDef &das_base_ctdef,
@@ -456,7 +458,8 @@ protected:
       is_table_without_pk_(false),
       reserved_advanced_trigger_(false),
       trans_info_expr_(nullptr),
-      is_vec_hnsw_index_vid_opt_(false)
+      is_vec_hnsw_index_vid_opt_(false),
+      has_ai_column_(false)
   { }
 };
 
@@ -474,13 +477,16 @@ struct ObDMLBaseRtDef
   //some modules to access the das rtdef
   ObDASDMLBaseRtDef &das_base_rtdef_;
   FkCheckerArray fk_checker_array_;
+  // AI column layout of the modified table, built on first use
+  void *ai_column_ctx_;
 protected:
   ObDMLBaseRtDef(ObDASDMLBaseRtDef &das_base_rtdef)
     : trig_rtdef_(),
       cur_row_num_(0),
       check_location_(nullptr),
       check_row_(nullptr),
-      das_base_rtdef_(das_base_rtdef)
+      das_base_rtdef_(das_base_rtdef),
+      ai_column_ctx_(nullptr)
   { }
 };
 

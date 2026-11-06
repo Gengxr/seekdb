@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
+#include "sql/ai_column/ob_ai_column_util.h"
 #include "sql/resolver/expr/ob_raw_expr_part_expr_checker.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -393,6 +394,12 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
     bool has_alter_partition = false;
     //in mysql mode, resolve add index after resolve column actions
     ObSEArray<int64_t, 4> add_index_action_idxs;
+    for (int64_t i = 0; OB_SUCC(ret) && node.num_child_ > 1 && i < node.num_child_; ++i) {
+      if (OB_NOT_NULL(node.children_[i]) && T_AI_COLUMN_RETRY == node.children_[i]->type_) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+      }
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < node.num_child_; ++i) {
       ParseNode *action_node = node.children_[i];
       if (OB_ISNULL(action_node)) {
@@ -420,6 +427,29 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         case T_CONVERT_TO_CHARACTER: {
           alter_table_stmt->set_convert_to_character();
           if (OB_FAIL(resolve_convert_to_character(*action_node))) {
+          }
+          break;
+        }
+        case T_AI_COLUMN_RETRY: {
+          bool is_ai = false;
+          const ParseNode *column_node = action_node->num_child_ > 0 ? action_node->children_[0] : nullptr;
+          const ParseNode *where_node = action_node->num_child_ > 1 ? action_node->children_[1] : nullptr;
+          ObString column_name;
+          ObString where;
+          if (OB_ISNULL(column_node)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (FALSE_IT(column_name.assign_ptr(column_node->str_value_,
+                                                     static_cast<int32_t>(column_node->str_len_)))) {
+          } else if (OB_FAIL(ObAIColumnUtil::get_spec(*allocator_, *table_schema_, column_name, is_ai))) {
+          } else if (!is_ai) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+          } else if (OB_NOT_NULL(where_node)
+                     && FALSE_IT(where.assign_ptr(where_node->str_value_,
+                                                  static_cast<int32_t>(where_node->str_len_)))) {
+          } else {
+            alter_table_stmt->set_ai_column_retry(
+                table_schema_->get_column_schema(column_name)->get_column_name_str(), where);
           }
           break;
         }
@@ -599,6 +629,10 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
     }
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(check_skip_index(alter_table_stmt->get_alter_table_arg().alter_table_schema_))) {
+    } else if (!ai_column_defs_.empty()) {
+      // AI COLUMN is only accepted when the column is created
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN in MODIFY or CHANGE COLUMN");
     }
     //deal with drop column affer drop constraint (mysql mode)
     if (OB_SUCC(ret) && drop_col_act_position_list.count() > 0) {
@@ -3458,6 +3492,25 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
           }
+        }
+        // AI column: add its hidden helper columns in the same ALTER
+        for (int64_t j = 0; OB_SUCC(ret) && j < ai_column_defs_.count(); ++j) {
+          if (0 != ai_column_defs_.at(j).column_name_.case_compare(alter_column_schema.get_column_name_str())) {
+            continue;
+          }
+          ObSEArray<ObColumnSchemaV2, 3> helpers;
+          if (OB_FAIL(resolve_ai_column_def(ai_column_defs_.at(j), alter_column_schema, *table_schema_, helpers))) {
+          } else if (OB_FAIL(alter_table_stmt->get_added_ai_columns().push_back(ai_column_defs_.at(j).column_name_))) {
+          } else if (OB_FAIL(ai_column_defs_.remove(j))) {
+          }
+          for (int64_t k = 0; OB_SUCC(ret) && k < helpers.count(); ++k) {
+            AlterColumnSchema helper;
+            if (OB_FAIL(helper.assign(helpers.at(k)))) {
+            } else if (FALSE_IT(helper.alter_type_ = OB_DDL_ADD_COLUMN)) {
+            } else if (OB_FAIL(alter_table_stmt->add_column(helper))) {
+            }
+          }
+          break;
         }
       }
     }

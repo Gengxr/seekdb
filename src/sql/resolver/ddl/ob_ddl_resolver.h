@@ -529,6 +529,18 @@ protected:
                                                      bool& is_set_cur_default);
   int resolve_normal_column_attribute_constr_null(ObColumnSchemaV2 &column,
                                                   ObColumnResolveStat &resolve_stat);
+  struct AIColumnDef
+  {
+    TO_STRING_KV(K_(column_name));
+    common::ObString column_name_;
+    const ParseNode *node_;
+  };
+  // Validates an AI COLUMN definition and builds its hidden helper columns.
+  int resolve_ai_column_def(const AIColumnDef &def,
+                            const share::schema::ObColumnSchemaV2 &result_column,
+                            const share::schema::ObTableSchema &table_schema,
+                            common::ObIArray<share::schema::ObColumnSchemaV2> &helpers);
+  bool is_ai_column_in_definition(const common::ObString &column_name) const;
   int resolve_normal_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                       ParseNode *attrs_node,
                                       ObColumnResolveStat &reslove_stat,
@@ -881,6 +893,9 @@ protected:
   common::ObString vec_column_name_;
   ObIndexType vec_index_type_;
   ObSemiStructEncodingType semistruct_encoding_type_;
+  // AI COLUMN clauses seen while resolving column definitions, consumed by CREATE TABLE
+  // and ALTER TABLE ADD COLUMN.
+  common::ObSEArray<AIColumnDef, 2> ai_column_defs_;
 private:
   template <typename STMT>
   DISALLOW_COPY_AND_ASSIGN(ObDDLResolver);

@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "ob_dml_resolver.h"
+#include "sql/ai_column/ob_ai_column_util.h"
 #include "sql/resolver/dml/ob_view_table_resolver.h"
 #include "sql/optimizer/ob_optimizer_util.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
@@ -1863,6 +1864,11 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
     const ObColumnSchemaV2 *col_schema = NULL;
     const ObTableSchema *table_schema = NULL;
     uint64_t tid = table_item.ref_id_;
+    if (!include_hidden && session_info_->is_inner()
+        && ObAIColumnUtil::is_helper_column_name(column_name)) {
+      // the AI column worker and RETRY read and write the hidden helper columns
+      include_hidden = true;
+    }
     if (!include_hidden) {
       if (!ObCharset::case_insensitive_equal(column_name, OB_HIDDEN_PK_INCREMENT_COLUMN_NAME)) {
         //do nothing
@@ -2051,6 +2057,7 @@ int ObDMLResolver::resolve_columns(ObRawExpr *&expr, ObArray<ObQualifiedName> &c
     } else if (OB_FAIL(resolve_qualified_identifier(q_name, columns, real_exprs, real_ref_expr))) {
       LOG_WARN_IGNORE_COL_NOTFOUND(ret, "resolve column ref expr failed", K(ret), K(q_name));
       report_user_error_msg(ret, expr, q_name);
+    } else if (OB_FAIL(check_ai_column_read(real_ref_expr))) {
     } else if (OB_FAIL(real_exprs.push_back(real_ref_expr))) {
     } else if (OB_FAIL(ref_exprs.push_back(q_name.ref_expr_))
               || OB_FAIL(replace_ref_exprs.push_back(real_ref_expr))) {
@@ -2062,6 +2069,51 @@ int ObDMLResolver::resolve_columns(ObRawExpr *&expr, ObArray<ObQualifiedName> &c
 
   if (OB_SUCC(ret) && OB_NOT_NULL(expr) && expr->is_sys_func_expr()
       && OB_FAIL(check_col_param_on_expr(expr))) {
+  }
+  return ret;
+}
+
+int ObDMLResolver::check_ai_column_read(const ObRawExpr *expr)
+{
+  int ret = OB_SUCCESS;
+  const ObDMLStmt *stmt = get_stmt();
+  const TableItem *table_item = nullptr;
+  if (OB_ISNULL(expr) || !expr->is_column_ref_expr() || OB_ISNULL(stmt)) {
+  } else {
+    const ObColumnRefRawExpr *col_expr = static_cast<const ObColumnRefRawExpr *>(expr);
+    if (OB_NOT_NULL(table_item = stmt->get_table_item_by_id(col_expr->get_table_id()))
+        && OB_FAIL(check_ai_column_read(*table_item, col_expr->get_column_name()))) {
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::check_ai_column_read(const TableItem &table_item, const ObString &column_name)
+{
+  int ret = OB_SUCCESS;
+  const ObTableSchema *table_schema = nullptr;
+  const ObColumnSchemaV2 *column = nullptr;
+  bool is_ai = false;
+  int64_t strict_read = 0;
+  if (!table_item.is_basic_table() || OB_ISNULL(session_info_) || session_info_->is_inner()) {
+  } else if (OB_ISNULL(schema_checker_) || OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table_item.ref_id_, table_schema))) {
+  } else if (OB_ISNULL(table_schema) || !ObAIColumnUtil::has_ai_column(*table_schema)) {
+  } else if (OB_FAIL(ObAIColumnUtil::get_spec(*allocator_, *table_schema, column_name, is_ai))) {
+  } else if (!is_ai || OB_ISNULL(column = table_schema->get_column_schema(column_name))) {
+  } else {
+    if (OB_NOT_NULL(params_.query_ctx_)) {
+      params_.query_ctx_->has_ai_column_read_ = true;
+    }
+    if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+    } else if (0 != strict_read
+               && OB_FAIL(ObAIColumnUtil::check_column_ready(table_item.database_name_,
+                                                             table_schema->get_table_name_str(),
+                                                             column->get_column_name_str(),
+                                                             table_schema->get_table_id(),
+                                                             column->get_column_id()))) {
+    }
   }
   return ret;
 }

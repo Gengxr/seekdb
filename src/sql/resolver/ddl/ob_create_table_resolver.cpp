@@ -896,6 +896,27 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
 
+    // AI columns keep their state in hidden helper columns appended after the user columns.
+    for (int64_t i = 0; OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule && i < ai_column_defs_.count(); ++i) {
+      const ObColumnSchemaV2 *result_column = table_schema.get_column_schema(ai_column_defs_.at(i).column_name_);
+      ObSEArray<ObColumnSchemaV2, 3> helpers;
+      if (OB_ISNULL(result_column)) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "AI result column is missing", K(ret), K(ai_column_defs_.at(i)));
+      } else if (OB_FAIL(resolve_ai_column_def(ai_column_defs_.at(i), *result_column, table_schema, helpers))) {
+      }
+      for (int64_t j = 0; OB_SUCC(ret) && j < helpers.count(); ++j) {
+        ObColumnSchemaV2 &helper = helpers.at(j);
+        helper.set_column_id(gen_column_id());
+        if (OB_FAIL(table_schema.add_column(helper))) {
+        } else {
+          ObColumnNameHashWrapper name_key(helper.get_column_name_str());
+          if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+          }
+        }
+      }
+    }
+
     // A table must have at least one column as a visible column
     if (OB_SUCC(ret)) {
       // RESOLVE_NON_COL == resolve_rule when, only parse non-column definitions

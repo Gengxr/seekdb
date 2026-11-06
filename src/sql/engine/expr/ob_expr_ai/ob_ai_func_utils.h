@@ -353,6 +353,8 @@ public:
    virtual ~ObAIFuncModel() {}
    // completion
    int call_completion(ObString &prompt, ObJsonObject *config, ObString &result);
+   static int take_system_prompt(ObJsonObject *config, ObString &system_prompt);
+   static constexpr const char *SYSTEM_PROMPT_KEY = "system_prompt";
    int call_completion_vector(ObArray<ObString> &prompts, ObJsonObject *config, ObArray<ObString> &results);
    // dense_embedding
    int call_dense_embedding(ObString &content, ObJsonObject *config, ObString &result);

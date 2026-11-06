@@ -29,6 +29,7 @@
 #include <thread>
 #include <cstdio>
 #include "observer/ob_server.h"
+#include "observer/ai_column/ob_ai_column_worker.h"
 #include "observer/ob_system_package_load_service.h"
 #include "rootserver/ob_ddl_service_launcher.h"
 #include "share/ob_autoincrement_service.h"
@@ -1350,6 +1351,11 @@ int ObServer::start()
     GCTX.status_ = SS_SERVING;
     GCTX.start_service_time_ = start_service_time;
     FLOG_INFO("[OBSERVER_NOTICE] observer start service", "start_service_time", GCTX.start_service_time_);
+    int tmp_ret = OB_SUCCESS;
+    if (OB_SUCCESS != (tmp_ret = ObAIColumnWorker::get_instance().start())) {
+      // AI columns are generated in the background; the server serves without them
+      LOG_WARN("failed to start AI column worker", K(tmp_ret));
+    }
     LOG_DBA_INFO_V2(OB_SERVER_START_SUCCESS,
                     DBA_STEP_INC_INFO(server_start),
                     "observer start success.");
@@ -1553,6 +1559,7 @@ int ObServer::stop()
   int fail_ret = OB_SUCCESS;
   FLOG_INFO("[OBSERVER_NOTICE] stop observer begin");
   LOG_DBA_INFO_V2(OB_SERVER_STOP_BEGIN, "observer stop begin.");
+  ObAIColumnWorker::get_instance().stop();
 
   if (in_process_) {
     // DDL retries must observe cancellation while schema and SQL services are still available.

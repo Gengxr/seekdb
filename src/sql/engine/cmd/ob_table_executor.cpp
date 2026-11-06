@@ -19,6 +19,7 @@
 #include "common/ob_timeout_ctx.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/ob_server_struct.h"
+#include "sql/ai_column/ob_ai_column_util.h"
 #include "sql/engine/cmd/ob_table_executor.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/command/ob_root_service_serialization.h"
@@ -486,6 +487,11 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
         if (OB_FAIL(ObDDLExecutorUtil::execute_pcreate_table(
             my_session, ctx.root_command_service(), "[parallel create table]",
                                                           create_table_arg, res))) {
+        } else if (res.do_nothing_ || !ObAIColumnUtil::has_ai_column(table_schema)) {
+        } else if (OB_FAIL(ObAIColumnUtil::sync_metadata(create_table_arg.db_name_,
+                                                         table_schema.get_table_name_str(),
+                                                         table_schema, nullptr))) {
+          LOG_WARN("failed to record AI column metadata", K(ret));
         }
       }
     } else {
@@ -762,6 +768,31 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_ai_column_retry()) {
+    ObArenaAllocator allocator("AIColumnRetry");
+    const ObTableSchema *table_schema = nullptr;
+    ObSQLSessionInfo *my_session = ctx.get_my_session();
+    ObAIColumnSpec spec;
+    bool is_ai = false;
+    int64_t affected_rows = 0;
+    // the schema guard of the sql context is not usable while a command executes
+    SMART_VAR(ObSchemaGetterGuard, retry_schema_guard) {
+    if (OB_ISNULL(my_session) || OB_ISNULL(GCTX.schema_service_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(retry_schema_guard))) {
+    } else if (OB_FAIL(retry_schema_guard.get_table_schema(
+                   stmt.get_org_database_name(), stmt.get_org_table_name(), false, table_schema))) {
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_TABLE_NOT_EXIST;
+    } else if (OB_FAIL(ObAIColumnUtil::get_spec(allocator, *table_schema, stmt.get_ai_retry_column(),
+                                                is_ai, &spec))) {
+    } else if (!is_ai) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+    } else if (OB_FAIL(ObAIColumnUtil::retry(stmt.get_org_database_name(), stmt.get_org_table_name(),
+                                             spec, stmt.get_ai_retry_where(), affected_rows))) {
+    }
+    }
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;
@@ -865,6 +896,29 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
             res.task_id_, res.ddl_need_retry_at_executor_, my_session,
             *ctx.get_query_runtime_environment(), ctx.local_command_service(), is_support_cancel))) {
         }
+      }
+    }
+    if (OB_SUCC(ret) && !stmt.get_added_ai_columns().empty()) {
+      // the alter table schema only holds the changed columns, read the table as it is now
+      SMART_VAR(ObSchemaGetterGuard, ai_schema_guard) {
+      const ObTableSchema *altered_table = nullptr;
+      if (OB_FAIL(refresh_schema_for_table())) {
+      } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(ai_schema_guard))) {
+      } else if (OB_FAIL(ai_schema_guard.get_table_schema(stmt.get_org_database_name(),
+                                                          stmt.get_org_table_name(),
+                                                          false, altered_table))) {
+      } else if (OB_ISNULL(altered_table)) {
+        ret = OB_TABLE_NOT_EXIST;
+      } else if (OB_FAIL(ObAIColumnUtil::sync_metadata(stmt.get_org_database_name(),
+                                                       stmt.get_org_table_name(),
+                                                       *altered_table,
+                                                       &stmt.get_added_ai_columns()))) {
+        LOG_WARN("failed to record AI column metadata", K(ret));
+      } else if (OB_FAIL(ObAIColumnUtil::backfill(stmt.get_org_database_name(),
+                                                  stmt.get_org_table_name(),
+                                                  stmt.get_added_ai_columns()))) {
+        LOG_WARN("failed to request AI column generation for existing rows", K(ret));
+      }
       }
     }
     char table_info_buffer[256];

@@ -1364,6 +1364,23 @@ int ObAIFuncUtils::get_ai_func_info(ObIAllocator &allocator, const ObString &mod
   return ret;
 }
 
+// The "system_prompt" config key is sent as the system message instead of a request parameter.
+int ObAIFuncModel::take_system_prompt(ObJsonObject *config, ObString &system_prompt)
+{
+  int ret = OB_SUCCESS;
+  ObJsonNode *node = nullptr;
+  if (OB_ISNULL(config) || OB_ISNULL(node = config->get_value(SYSTEM_PROMPT_KEY))) {
+  } else if (node->json_type() != ObJsonNodeType::J_STRING) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, system_prompt must be a string");
+  } else {
+    system_prompt.assign_ptr(node->get_data(), static_cast<int32_t>(node->get_data_length()));
+    if (OB_FAIL(config->remove(SYSTEM_PROMPT_KEY))) {
+    }
+  }
+  return ret;
+}
+
 int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObString &result)
 {
   int ret = OB_SUCCESS;
@@ -1380,6 +1397,7 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   if (!is_completion_type()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, info type is not completion");
+  } else if (OB_FAIL(take_system_prompt(config, prompt_str))) {
   } else if (OB_FAIL(ObAIFuncUtils::get_complete_provider(*allocator_, endpoint_info_.get_provider(), complete_provider))) {
   } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
   } else if (OB_FAIL(complete_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
