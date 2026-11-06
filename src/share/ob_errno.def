@@ -1890,6 +1890,8 @@ DEFINE_ERROR_EXT(OB_AI_FUNC_PARAM_TYPE_INVALID, -11117, -1, "HY000", "This param
 DEFINE_ERROR_EXT(OB_AI_FUNC_MODEL_NOT_FOUND, -11118, -1, "HY000", "This AI model is not found", "This AI model \'%.*s\' was not found");
 DEFINE_ERROR_EXT(OB_AI_FUNC_MODEL_EXISTS, -11119, -1, "HY000", "This ai model is already exists", "This ai model \'%.*s\' is already exists");
 DEFINE_ERROR_EXT(OB_AI_COLUMN_UNFINISHED_TASKS, -11120, -1, "HY000", "AI column has unfinished tasks", "AI column has unfinished tasks for table_id=%lu, column_id=%lu");
+DEFINE_ERROR_EXT(OB_FILE_SQL_INVALID_DATA, -11121, -1, "HY000", "Invalid data in file", "%.*s");
+DEFINE_ERROR_EXT(OB_FILE_SQL_FILE_CHANGED, -11122, -1, "HY000", "File changed after its schema was inferred", "File \'%.*s\' changed after its schema was inferred, run the statement again");
 // 余留位置
 ////////////////////////////////////////////////////////////////
 // SQL扩展区段1：[-11000, -12000)

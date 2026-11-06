@@ -4410,6 +4410,7 @@ int ObJsonTableDef::deep_copy(const ObJsonTableDef& src, ObIRawExprCopier &expr_
 {
   int ret = OB_SUCCESS;
   table_type_ = src.table_type_;
+  file_row_count_ = src.file_row_count_;
   for (size_t i = 0; OB_SUCC(ret) && i < src.doc_exprs_.count(); ++i) {
     if (OB_ISNULL(src.doc_exprs_.at(i))) {
       ret = OB_ERR_UNEXPECTED;

@@ -1663,6 +1663,11 @@ SQL_SIMD_UNITY_GROUPS = [
 SQL_STANDALONE_SOURCES = [
     struct(path = "src/sql/ai_column/ob_ai_column_util.cpp", language = "c++", kind = "source"),
     struct(path = "src/sql/ai_column/ob_ai_column_dml.cpp", language = "c++", kind = "source"),
+    struct(path = "src/sql/engine/basic/ob_file_scan_utils.cpp", language = "c++", kind = "source"),
+    struct(path = "src/sql/engine/basic/ob_parquet_reader.cpp", language = "c++", kind = "source"),
+    struct(path = "src/sql/resolver/cmd/ob_describe_query_resolver.cpp", language = "c++", kind = "source"),
+    struct(path = "src/sql/resolver/cmd/ob_copy_to_resolver.cpp", language = "c++", kind = "source"),
+    struct(path = "src/sql/engine/cmd/ob_copy_to_executor.cpp", language = "c++", kind = "source"),
     struct(path = "src/sql/engine/aggregate/ob_aggregate_processor.cpp", language = "c++", kind = "source"),
     struct(path = "src/sql/engine/expr/ob_expr_add.cpp", language = "c++", kind = "source"),
     struct(path = "src/sql/engine/expr/ob_expr_array_sort.cpp", language = "c++", kind = "source"),

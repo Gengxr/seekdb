@@ -586,7 +586,8 @@ public:
       ori_question_marks_count_(0),
       type_demotion_flag_(0),
       has_hybrid_search_(false),
-      has_ai_column_read_(false)
+      has_ai_column_read_(false),
+      has_file_table_(false)
   {
   }
   TO_STRING_KV(N_PARAM_NUM, question_marks_count_,
@@ -631,6 +632,7 @@ public:
     type_demotion_flag_ = 0;
     has_hybrid_search_ = false;
     has_ai_column_read_ = false;
+    has_file_table_ = false;
   }
 
   int64_t get_new_stmt_id() { return stmt_count_++; }
@@ -669,6 +671,7 @@ public:
   };
   bool has_hybrid_search() const { return has_hybrid_search_; }
   bool has_ai_column_read() const { return has_ai_column_read_; }
+  bool has_file_table() const { return has_file_table_; }
 
 public:
   static const int64_t CALCULABLE_EXPR_NUM = 1;
@@ -744,6 +747,7 @@ public:
   bool has_hybrid_search_;
   // AI column completeness is checked while resolving, so such plans are not cached.
   bool has_ai_column_read_;
+  bool has_file_table_;
 };
 
 } /* ns sql*/

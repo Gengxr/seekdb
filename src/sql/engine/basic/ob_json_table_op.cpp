@@ -326,7 +326,8 @@ OB_DEF_SERIALIZE(ObJsonTableSpec)
     OB_UNIS_ENCODE(info);
   }
   if (OB_FAIL(ret)) {
-  } else if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE) {
+  } else if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE
+             || table_type_ == MulModeTableType::OB_FILE_TABLE_TYPE) {
     OB_UNIS_ENCODE(table_type_);
     int32_t value_exprs_count = value_exprs_.count() - 1;
     OB_UNIS_ENCODE(value_exprs_count);
@@ -354,7 +355,8 @@ OB_DEF_SERIALIZE_SIZE(ObJsonTableSpec)
     const ObJtColInfo& info = *cols_def_.at(i);
     OB_UNIS_ADD_LEN(info);
   }
-  if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE) {
+  if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE
+      || table_type_ == MulModeTableType::OB_FILE_TABLE_TYPE) {
     OB_UNIS_ADD_LEN(table_type_);
     int32_t value_exprs_count = value_exprs_.count() - 1;
     OB_UNIS_ADD_LEN(value_exprs_count);
@@ -393,7 +395,8 @@ OB_DEF_DESERIALIZE(ObJsonTableSpec)
       OB_UNIS_DECODE(tmp_col_info);
       *col_info = tmp_col_info;
       if (OB_FAIL(cols_def_.push_back(col_info))) {
-      } else if (col_info->col_type_ == COL_TYPE_UNNEST) {
+      } else if (col_info->col_type_ == COL_TYPE_UNNEST || col_info->col_type_ == COL_TYPE_FILE) {
+        // both carry their table type after the columns
         table_type_flag = OB_UNNEST_TABLE;
       }
     }
@@ -587,6 +590,8 @@ int ObJsonTableOp::inner_open()
   if (OB_FAIL(init())) {
   } else if (MY_SPEC.value_exprs_.empty()) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (OB_NOT_NULL(file_scan_)) {
+    ret = file_scan_->open();
   } else if (OB_FAIL(root_->open(&jt_ctx_))) {
   } else {
     is_evaled_ = false;
@@ -603,6 +608,8 @@ int ObJsonTableOp::inner_rescan()
     jt_ctx_.row_alloc_.reuse();
   }
   if (OB_FAIL(ret)) {
+  } else if (OB_NOT_NULL(file_scan_)) {
+    ret = file_scan_->rescan();
   } else if (OB_FAIL(reset_variable())) {
   }
   return ret;
@@ -636,7 +643,22 @@ int ObJsonTableOp::init()
 {
   INIT_SUCC(ret);
   
-  if (!is_inited_) {
+  if (!is_inited_ && MulModeTableType::OB_FILE_TABLE_TYPE == MY_SPEC.table_type_) {
+    // a file table reads its rows with its own scanner
+    void *buf = allocator_->alloc(sizeof(ObFileTableScan));
+    jt_ctx_.spec_ptr_ = const_cast<ObJsonTableSpec*>(&MY_SPEC);
+    jt_ctx_.eval_ctx_ = &eval_ctx_;
+    jt_ctx_.exec_ctx_ = &get_exec_ctx();
+    jt_ctx_.op_exec_alloc_ = allocator_;
+    jt_ctx_.jt_op_ = this;
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (FALSE_IT(file_scan_ = new (buf) ObFileTableScan(*allocator_))) {
+    } else if (OB_FAIL(file_scan_->init(MY_SPEC))) {
+    } else {
+      is_inited_ = true;
+    }
+  } else if (!is_inited_) {
     const ObJsonTableSpec* spec_ptr = reinterpret_cast<const ObJsonTableSpec*>(&spec_);
     jt_ctx_.spec_ptr_ = const_cast<ObJsonTableSpec*>(spec_ptr);
     if (OB_FAIL(generate_table_exec_tree())) {
@@ -685,6 +707,9 @@ int ObJsonTableOp::init()
 int ObJsonTableOp::inner_close()
 {
   INIT_SUCC(ret);
+  if (OB_NOT_NULL(file_scan_)) {
+    file_scan_->close();
+  }
   if (OB_NOT_NULL(root_)) {
     if (OB_FAIL(root_->reset(&jt_ctx_))) {
     }
@@ -722,7 +747,98 @@ void ScanNode::reset_reg_columns(JtScanCtx* ctx)
 
 void ObJsonTableOp::destroy()
 {
+  if (OB_NOT_NULL(file_scan_)) {
+    file_scan_->~ObFileTableScan();
+    file_scan_ = nullptr;
+  }
   ObOperator::destroy();
+}
+
+int ObFileTableScan::init(const ObJsonTableSpec &spec)
+{
+  int ret = OB_SUCCESS;
+  if (spec.cols_def_.empty() || OB_ISNULL(spec.cols_def_.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(options_.deserialize(allocator_, spec.cols_def_.at(0)->path_))) {
+  }
+  for (int64_t i = 1; OB_SUCC(ret) && i < spec.cols_def_.count(); ++i) {
+    const ObJtColInfo *info = spec.cols_def_.at(i);
+    ObFileColumnDesc column;
+    if (OB_ISNULL(info) || COL_TYPE_FILE != info->col_type_) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      column.name_ = info->col_name_;
+      column.type_ = static_cast<ObFileColType>(info->on_mismatch_type_);
+      column.nullable_ = (1 == info->on_empty_);
+      column.src_key_ = info->path_;
+      column.src_idx_ = 0;
+      for (int64_t j = 0; ObFileFormat::JSON != options_.format_ && j < info->path_.length(); ++j) {
+        column.src_idx_ = column.src_idx_ * 10 + (info->path_.ptr()[j] - '0');
+      }
+      if (OB_FAIL(columns_.push_back(column))) {
+      } else if (OB_FAIL(needed_.push_back(info->output_column_idx_ >= 0))) {
+      } else if (OB_FAIL(expr_idx_.push_back(info->output_column_idx_))) {
+      } else if (info->output_column_idx_ >= spec.column_exprs_.count()) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFileTableScan::get_next_row(const ObJsonTableSpec &spec, ObEvalCtx &eval_ctx)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(reader_.get_next_row(values_))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < columns_.count(); ++i) {
+    const int64_t idx = expr_idx_.at(i);
+    if (idx < 0) {
+      continue;
+    }
+    ObExpr *expr = spec.column_exprs_.at(idx);
+    ObDatum &datum = expr->locate_datum_for_write(eval_ctx);
+    const ObFileValue &value = values_.at(i);
+    if (value.is_null_) {
+      datum.set_null();
+    } else {
+      switch (columns_.at(i).type_) {
+        case ObFileColType::BOOLEAN:
+        case ObFileColType::BIGINT:
+          datum.set_int(value.int_);
+          break;
+        case ObFileColType::DOUBLE:
+          datum.set_double(value.double_);
+          break;
+        case ObFileColType::DATE:
+          datum.set_date(static_cast<int32_t>(value.int_));
+          break;
+        case ObFileColType::DATETIME:
+          datum.set_datetime(value.int_);
+          break;
+        case ObFileColType::VARCHAR: {
+          char *buf = nullptr;
+          if (value.str_.length() > 0
+              && OB_ISNULL(buf = expr->get_str_res_mem(eval_ctx, value.str_.length()))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            if (value.str_.length() > 0) {
+              MEMCPY(buf, value.str_.ptr(), value.str_.length());
+            }
+            datum.set_string(buf, value.str_.length());
+          }
+          break;
+        }
+        case ObFileColType::NULL_TYPE:
+          datum.set_null();
+          break;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      expr->set_evaluated_projected(eval_ctx);
+    }
+  }
+  return ret;
 }
 
 int RegularCol::check_item_method_json(ObRegCol &col_node, JtScanCtx* ctx)
@@ -1402,7 +1518,10 @@ int ObJsonTableOp::inner_get_next_row()
 {
   INIT_SUCC(ret);
   bool is_root_null = false;
-  if (!(jt_ctx_.is_json_table_func()
+  if (OB_NOT_NULL(file_scan_)) {
+    clear_evaluated_flag();
+    ret = file_scan_->get_next_row(MY_SPEC, eval_ctx_);
+  } else if (!(jt_ctx_.is_json_table_func()
         || jt_ctx_.is_unnest_table_func())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (is_evaled_) {

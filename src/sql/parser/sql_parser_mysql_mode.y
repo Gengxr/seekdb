@@ -356,6 +356,7 @@ END_P SET_VAR DELIMITER
         TIME_ZONE_INFO TOP_K_FRE_HIST TRIM_SPACE TABLETS TIME_UNIT TIME_ZONE
 
         UNCOMMITTED UNCONDITIONAL UNDEFINED UNNEST UNICODE UNLOCKED UNTIL UPGRADE
+        READ_CSV READ_JSON READ_JSON_AUTO READ_NDJSON READ_PARQUET GLOB
         UNUSUAL UNKNOWN USE_FRM USER UNBOUNDED UNLIMITED USER_SPECIFIED
 
         VALID VALUE VARIANCE VARIABLES VERBOSE VERIFY VIEW VISIBLE VALIDATE VAR_POP
@@ -497,6 +498,8 @@ END_P SET_VAR DELIMITER
 %type <node> dynamic_sampling_hint
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
+%type <node> file_table_expr file_table_func opt_file_table_options file_table_option_list file_table_option file_option_value
+%type <node> copy_stmt opt_copy_options copy_option_list copy_option copy_option_name copy_option_value
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
@@ -582,6 +585,7 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -10890,6 +10894,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | hybrid_search_expr
 {
   $$ = $1;
@@ -12311,7 +12319,12 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt
+{
+  GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);
+  // DESCRIBE of a query that reads a file shows the columns of the query
+  $$->reserved_ = (NULL != $1) ? 1 : 0;
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12352,8 +12365,16 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
+| DESC
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
 ;
 
 explainable_stmt:
@@ -17506,6 +17527,205 @@ UNNEST '(' simple_expr_list ')'
 }
 ;
 
+file_table_expr:
+file_table_func '(' STRING_VALUE opt_file_table_options ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE, 4, $1, $3, $4, NULL);
+}
+| file_table_func '(' STRING_VALUE opt_file_table_options ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE, 4, $1, $3, $4, $6);
+}
+| file_table_func '(' STRING_VALUE opt_file_table_options ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE, 4, $1, $3, $4, $7);
+}
+;
+
+file_table_func:
+READ_CSV
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
+| READ_JSON
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 2;
+}
+| READ_JSON_AUTO
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 2;
+}
+| READ_NDJSON
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 3;
+}
+| READ_PARQUET
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 4;
+}
+| GLOB
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 5;
+}
+;
+
+opt_file_table_options:
+/* empty */
+{
+  $$ = NULL;
+}
+| ',' file_table_option_list
+{
+  merge_nodes($$, result, T_EXPR_LIST, $2);
+}
+;
+
+file_table_option_list:
+file_table_option
+{
+  $$ = $1;
+}
+| file_table_option_list ',' file_table_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_option:
+column_name COMP_EQ file_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
+}
+| SKIP COMP_EQ file_option_value
+{
+  ParseNode *name = NULL;
+  make_name_node(name, result->malloc_pool_, "skip");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name, $3);
+}
+| DELIMITER COMP_EQ file_option_value
+{
+  ParseNode *name = NULL;
+  make_name_node(name, result->malloc_pool_, "delimiter");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name, $3);
+}
+| NULLX COMP_EQ file_option_value
+{
+  ParseNode *name = NULL;
+  (void)($1);
+  make_name_node(name, result->malloc_pool_, "null");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name, $3);
+}
+;
+
+file_option_value:
+STRING_VALUE
+{
+  $$ = $1;
+}
+| INTNUM
+{
+  $$ = $1;
+}
+| '-' INTNUM
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = -$2->value_;
+}
+| BOOL_VALUE
+{
+  $$ = $1;
+}
+;
+
+copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE opt_copy_options
+{
+  ParseNode *query_node = NULL;
+  (void)($3); // the query runs from its text
+  malloc_terminal_node(query_node, result->malloc_pool_, T_VARCHAR);
+  dup_expr_string(query_node, result, @3.first_column, @3.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO, 4, query_node, NULL, $6, $7);
+}
+| COPY relation_factor TO STRING_VALUE opt_copy_options
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO, 4, NULL, $2, $4, $5);
+}
+;
+
+opt_copy_options:
+/* empty */
+{
+  $$ = NULL;
+}
+| '(' copy_option_list ')'
+{
+  merge_nodes($$, result, T_EXPR_LIST, $2);
+}
+;
+
+copy_option_list:
+copy_option
+{
+  $$ = $1;
+}
+| copy_option_list ',' copy_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_option:
+copy_option_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, NULL);
+}
+| copy_option_name copy_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $2);
+}
+;
+
+copy_option_name:
+column_name
+{
+  $$ = $1;
+}
+| DELIMITER
+{
+  make_name_node($$, result->malloc_pool_, "delimiter");
+}
+| NULLX
+{
+  (void)($1);
+  make_name_node($$, result->malloc_pool_, "null");
+}
+;
+
+copy_option_value:
+STRING_VALUE
+{
+  $$ = $1;
+}
+| INTNUM
+{
+  $$ = $1;
+}
+| BOOL_VALUE
+{
+  $$ = $1;
+}
+| column_name
+{
+  $$ = $1;
+}
+;
+
 hybrid_search_expr:
 HYBRID_SEARCH '(' literal ',' hybrid_search_param ')'
 {
@@ -18168,6 +18388,12 @@ ACCOUNT
 |       UNCONDITIONAL
 |       UNDEFINED
 |       UNNEST
+|       READ_CSV
+|       READ_JSON
+|       READ_JSON_AUTO
+|       READ_NDJSON
+|       READ_PARQUET
+|       GLOB
 |       UNICODE
 |       UNKNOWN
 |       UNLOCKED

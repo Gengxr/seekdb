@@ -2108,6 +2108,20 @@ int ObSqlParameterization::mark_tree(ParseNode *tree ,SqlInfo &sql_info)
       if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_FIVE, sql_info))) {
       }
     }
+  } else if (T_FILE_TABLE == tree->type_ || T_COPY_TO == tree->type_) {
+    // the path and the options decide the schema of the file, they stay literals
+    if (4 != tree->num_child_) {
+      ret = OB_INVALID_ARGUMENT;
+      SQL_PC_LOG(WARN, "invalid file table argument", K(ret), K(tree->num_child_));
+    } else {
+      // the options and the alias are optional
+      sql_info.ps_need_parameterized_ = false;
+      for (int64_t i = 0; i < tree->num_child_; ++i) {
+        if (OB_NOT_NULL(tree->children_[i])) {
+          tree->children_[i]->is_tree_not_param_ = true;
+        }
+      }
+    }
   } else if (T_FUN_SYS_TREAT == tree->type_) {
     if (2 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;

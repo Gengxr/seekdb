@@ -8414,6 +8414,11 @@ int ObJoinOrder::generate_json_table_paths()
     // magic number ? todo refine this
     output_rows_ = 199;
     output_row_size_ = 199;
+    if (MulModeTableType::OB_FILE_TABLE_TYPE == table_item->json_table_def_->table_type_
+        && table_item->json_table_def_->file_row_count_ >= 0) {
+      // schema inference counted the rows of the file
+      output_rows_ = MAX(1, table_item->json_table_def_->file_row_count_);
+    }
     json_path->strong_sharding_ = get_plan()->get_optimizer_context().get_match_all_sharding();
     if (OB_FAIL(json_path->set_parallel_info_for_match_all())) {
     } else if (OB_FAIL(ObOptimizerUtil::classify_subquery_exprs(get_restrict_infos(),

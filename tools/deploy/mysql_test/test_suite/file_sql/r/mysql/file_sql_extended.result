@@ -1,0 +1,134 @@
+# CSV options: delimiter, NULL text, quotes with delimiters, line breaks and escapes
+order_id	customer	amount	paid	note
+1	alice	10.5	1	first; with delimiter
+2	bob	NULL	0	NULL
+3	alice	7	1	line one<NL>line two
+4	carol	20.25	0	doubled "quote"
+id	text
+1	backslash "escaped" quote
+2	comma, inside
+column0	column1
+7	seven
+8	eight
+# deterministic type inference: widening, int64 bounds, invalid dates and all NULL columns
+column_name	column_type	null	key	default	extra
+i	BIGINT	NO	NULL	NULL	NULL
+d	DOUBLE	NO	NULL	NULL	NULL
+b	BOOLEAN	NO	NULL	NULL	NULL
+mixed	VARCHAR	NO	NULL	NULL	NULL
+dt	DATETIME	NO	NULL	NULL	NULL
+bad_date	VARCHAR	NO	NULL	NULL	NULL
+big	DOUBLE	NO	NULL	NULL	NULL
+neg	BIGINT	NO	NULL	NULL	NULL
+empty_col	NULL	YES	NULL	NULL	NULL
+i	d	b	mixed	dt	bad_date	big	neg	empty_col
+1	1.5	1	1	2026-01-01 00:00:00.000	2026-02-30	9.223372036854776e18	-9223372036854775808	NULL
+2	2	0	x	2026-01-02 03:04:05.123	2024-02-29	9.223372036854776e18	-1	NULL
+# malformed rows are reported with their line, or skipped with ignore_errors
+ERROR HY000: file '<path>', line 3: expected 2 fields but found 1
+id	v
+1	10
+3	30
+ERROR HY000: file '<path>', line 2: unterminated quoted field
+# JSONL: union of keys in first-seen order, missing keys are NULL, conflicts become VARCHAR
+column_name	column_type	null	key	default	extra
+customer	VARCHAR	NO	NULL	NULL	NULL
+city	VARCHAR	YES	NULL	NULL	NULL
+since	DATE	YES	NULL	NULL	NULL
+vip	BOOLEAN	YES	NULL	NULL	NULL
+score	VARCHAR	YES	NULL	NULL	NULL
+customer	city	since	vip	score
+alice	Hangzhou	2020-01-01	NULL	NULL
+bob	Beijing	NULL	1	NULL
+carol	NULL	2021-06-30	0	3
+dave	NULL	NULL	NULL	n/a
+ERROR HY000: file '<path>', line 2: nested value of key 'a' is not supported
+ERROR HY000: file '<path>', line 2: invalid JSON at offset 7: syntax error
+ERROR 0A000: JSON formats other than newline_delimited not supported
+# Parquet: three row groups, nullable columns, projection of a subset of the columns
+column_name	column_type	null	key	default	extra
+id	BIGINT	YES	NULL	NULL	NULL
+grp	VARCHAR	YES	NULL	NULL	NULL
+qty	BIGINT	YES	NULL	NULL	NULL
+price	DOUBLE	YES	NULL	NULL	NULL
+ok	BOOLEAN	YES	NULL	NULL	NULL
+day	DATE	YES	NULL	NULL	NULL
+ts	DATETIME	YES	NULL	NULL	NULL
+id	grp	qty	price	ok	day	ts
+1	a	1	1.5	1	2026-08-01	2026-08-01 09:00:00
+2	b	NULL	2.5	0	2026-08-02	2026-08-01 09:00:01
+3	NULL	3	NULL	1	2026-08-03	2026-08-01 09:00:02
+4	a	4	4	NULL	2026-08-04	2026-08-01 09:00:03
+5	b	5	5.25	1	2026-08-05	2026-08-01 09:00:04
+6	a	NULL	6	0	2026-08-06	2026-08-01 09:00:05
+7	NULL	7	7	1	2026-08-07	2026-08-01 09:00:06
+8	c	8	NULL	1	2026-08-08	2026-08-01 09:00:07
+9	a	9	9.5	NULL	2026-08-09	2026-08-01 09:00:08
+10	b	10	10	0	2026-08-10	2026-08-01 09:00:09
+count(*)	count(grp)	sum(qty)	round(sum(price), 2)	sum(ok)	min(day)	max(ts)
+10	8	47	45.75	5	2026-08-01	2026-08-01 09:00:09
+# single file SQL: expressions, filter, grouping, HAVING, ordering and LIMIT
+grp	n	total	avg_price
+b	3	15	5.917
+a	3	13	6.500
+# joins between files: inner, left and across formats, executed by the seekdb engine
+order_id	customer	city
+1	alice	Hangzhou
+2	bob	Beijing
+3	alice	Hangzhou
+4	carol	NULL
+customer	orders
+alice	2
+bob	1
+carol	1
+dave	0
+id	grp	customer
+1	a	alice
+2	b	bob
+3	NULL	alice
+4	a	carol
+Query Plan
+=============================
+|ID|OPERATOR           |NAME|
+-----------------------------
+|0 |SCALAR GROUP BY    |    |
+|1 |└─HASH JOIN        |    |
+|2 |  ├─FILE TABLE SCAN|o   |
+|3 |  └─FILE TABLE SCAN|p   |
+=============================
+Outputs & filters:
+-------------------------------------
+  0 - output([T_FUN_COUNT(*)]), filter(nil), rowset=16
+      group(nil), agg_func([T_FUN_COUNT(*)])
+  1 - output(nil), filter(nil), rowset=16
+      equal_conds([p.id = o.order_id]), other_conds(nil)
+  2 - output([o.order_id]), filter(nil)
+      value(<file>)
+  3 - output([p.id]), filter(nil)
+      value(<file>)
+# COPY options and read back; an existing target is never replaced
+order_id	customer	amount	note
+1	alice	10.5	first; with delimiter
+2	bob	NULL	NULL
+3	alice	7	line one<NL>line two
+4	carol	20.25	doubled "quote"
+ERROR 58000: File already exist
+column0
+1
+# unknown options, options of another format, missing files and wrong formats
+ERROR 0A000: this option of the file reading function not supported
+ERROR 0A000: this option of the file reading function not supported
+ERROR HY000: File not exist
+ERROR HY000: file '<path>': not a Parquet file
+# the feature switch also covers glob and COPY
+ERROR 0A000: reading files while enable_file_sql is OFF not supported
+ERROR 0A000: COPY TO while enable_file_sql is OFF not supported
+file
+bad_rows.csv
+escapes.csv
+no_header.csv
+no_header_out.csv
+orders.csv
+orders_out.csv
+types.csv
+unterminated.csv

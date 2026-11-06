@@ -47,6 +47,7 @@ enum MulModeTableType {
   OB_ORA_JSON_TABLE_TYPE, // 1
   OB_ORA_XML_TABLE_TYPE = 2,
   OB_UNNEST_TABLE_TYPE = 3,
+  OB_FILE_TABLE_TYPE = 4,   // read_csv / read_json / read_parquet / glob
 };
 
 typedef struct ObJtColBaseInfo
@@ -92,13 +93,15 @@ typedef struct ObJsonTableDef {
     : all_cols_(),
       doc_exprs_(),
       table_type_(MulModeTableType::INVALID_TABLE_TYPE),
-      namespace_arr_() {}
+      namespace_arr_(),
+      file_row_count_(-1) {}
 
   int deep_copy(const ObJsonTableDef& src, ObIRawExprCopier &expr_copier, ObIAllocator* allocator);
   common::ObSEArray<ObJtColBaseInfo*, 4, common::ModulePageAllocator, true> all_cols_;
   common::ObSEArray<ObRawExpr*, 1, common::ModulePageAllocator, true> doc_exprs_;
   MulModeTableType table_type_;
   common::ObSEArray<ObString, 16, common::ModulePageAllocator, true> namespace_arr_;
+  int64_t file_row_count_;  // rows of a file table seen during schema inference, -1 if unknown
 } ObJsonTableDef;
 
 struct ObValuesTableDef {

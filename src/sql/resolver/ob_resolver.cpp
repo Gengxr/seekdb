@@ -94,6 +94,8 @@
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
 #include "sql/pl/ob_pl_package.h"
+#include "sql/resolver/cmd/ob_describe_query_resolver.h"
+#include "sql/resolver/cmd/ob_copy_to_resolver.h"
 
 namespace oceanbase
 {
@@ -472,8 +474,16 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(Revoke);
         break;
       }
+      case T_COPY_TO: {
+        REGISTER_STMT_RESOLVER(CopyTo);
+        break;
+      }
       case T_EXPLAIN: {
-        REGISTER_STMT_RESOLVER(Explain);
+        if (ObDescribeQueryResolver::is_describe_file_query(parse_tree)) {
+          REGISTER_SELECT_STMT_RESOLVER(DescribeQuery);
+        } else {
+          REGISTER_STMT_RESOLVER(Explain);
+        }
         break;
       }
       case T_ALTER_SYSTEM_SET: {

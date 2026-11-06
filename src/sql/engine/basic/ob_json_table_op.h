@@ -28,6 +28,7 @@
 #include "sql/engine/expr/ob_expr.h"
 #include "sql/engine/expr/ob_json_param_type.h"
 #include "sql/engine/expr/ob_expr_json_utils.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 
 namespace oceanbase
 {
@@ -149,6 +150,30 @@ public:
 
 class ObJsonTableOp;
 
+// Rows of a file table (read_csv, read_json, read_parquet, glob) for ObJsonTableOp.
+class ObFileTableScan
+{
+public:
+  ObFileTableScan(common::ObIAllocator &allocator)
+    : allocator_(allocator), reader_(allocator), options_(), columns_(), needed_(), expr_idx_(),
+      values_() {}
+  ~ObFileTableScan() { reader_.close(); }
+  int init(const ObJsonTableSpec &spec);
+  int open() { return reader_.open(options_, columns_, needed_); }
+  int rescan() { return reader_.rescan(); }
+  void close() { reader_.close(); }
+  int get_next_row(const ObJsonTableSpec &spec, ObEvalCtx &eval_ctx);
+
+private:
+  common::ObIAllocator &allocator_;
+  ObFileRowReader reader_;
+  ObFileScanOptions options_;
+  common::ObSEArray<ObFileColumnDesc, 16> columns_;
+  common::ObSEArray<bool, 16> needed_;
+  common::ObSEArray<int64_t, 16> expr_idx_;   // column expression of each file column, -1 if unused
+  common::ObSEArray<ObFileValue, 16> values_;
+};
+
 struct JtScanCtx {
     JtScanCtx()
       : row_alloc_(),
@@ -161,6 +186,10 @@ struct JtScanCtx {
 
   bool is_unnest_table_func() {
     return spec_ptr_->table_type_ == OB_UNNEST_TABLE_TYPE;
+  }
+
+  bool is_file_table_func() {
+    return spec_ptr_->table_type_ == OB_FILE_TABLE_TYPE;
   }
 
   ObJsonTableSpec* spec_ptr_;
@@ -197,7 +226,8 @@ public:
       input_(nullptr),
       j_null_(),
       j_arr_(allocator_),
-      j_obj_(allocator_)
+      j_obj_(allocator_),
+      file_scan_(nullptr)
   {
     const ObJsonTableSpec* spec_ptr = reinterpret_cast<const ObJsonTableSpec*>(&spec);
     col_count_ = spec_ptr->column_exprs_.count();
@@ -246,6 +276,7 @@ private:
   ObJsonNull j_null_;
   ObJsonArray j_arr_;
   ObJsonObject j_obj_;
+  ObFileTableScan *file_scan_;
 };
 
 class MulModeTableFunc {

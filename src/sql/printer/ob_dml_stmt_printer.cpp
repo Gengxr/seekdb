@@ -23,6 +23,7 @@
 #include "lib/charset/ob_charset.h"
 #include "sql/optimizer/ob_log_plan.h"
 #include "sql/monitor/ob_sql_plan.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 namespace oceanbase
 {
 using namespace common;
@@ -338,6 +339,28 @@ int ObDMLStmtPrinter::print_table(const TableItem *table_item,
             } else {
               DATA_PRINTF(")");
             }
+          }
+          break;
+        }
+        case MulModeTableType::OB_FILE_TABLE_TYPE : {
+          // the root column keeps the scan options of the file
+          ObArenaAllocator tmp_allocator("FileSqlPrint");
+          ObFileScanOptions options;
+          const char *func = "read_csv";
+          if (table_item->json_table_def_->all_cols_.empty()
+              || OB_ISNULL(table_item->json_table_def_->all_cols_.at(0))) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(options.deserialize(tmp_allocator, table_item->json_table_def_->all_cols_.at(0)->path_))) {
+          } else {
+            func = ObFileFormat::JSON == options.format_ ? "read_json"
+                   : (ObFileFormat::PARQUET == options.format_ ? "read_parquet"
+                      : (ObFileFormat::GLOB == options.format_ ? "glob" : "read_csv"));
+            DATA_PRINTF("%s('", func);
+            for (int64_t i = 0; OB_SUCC(ret) && i < options.path_.length(); ++i) {
+              const char c = options.path_.ptr()[i];
+              DATA_PRINTF("%s%c", '\'' == c ? "'" : "", c);
+            }
+            DATA_PRINTF("') %.*s", LEN_AND_PTR(table_item->alias_name_));
           }
           break;
         }

@@ -63,6 +63,8 @@ struct ResolverJoinInfo {
                K_(coalesce_expr));
 };
 
+struct ObFileScanOptions;
+
 struct ObDmlJtColDef
 {
   ObDmlJtColDef()
@@ -208,6 +210,10 @@ public:
   int resolve_json_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
+  int resolve_file_table_options(const ParseNode *options_node, const int64_t func,
+                                 ObFileScanOptions &options);
+  int check_file_table_path(const ObString &path, ObFileScanOptions &options);
   int create_unnest_table_item(TableItem *&table_item, ObString table_name);
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);
   int resolve_hybrid_search_item(const ParseNode &parse_tree, TableItem *&table_item);

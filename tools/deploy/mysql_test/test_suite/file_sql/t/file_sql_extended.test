@@ -1,0 +1,249 @@
+# owner: database-competition
+# owner group: SQL
+# description: File SQL options, type inference, error diagnostics, Parquet row groups, joins,
+#              COPY and the feature switch. The fixtures are written by the test client, so
+#              the client and the observer must share the file system.
+# tags: sql,executor,file_sql
+
+--disable_query_log
+let $FILE_SQL_EXT_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql_ext;
+--exec rm -rf $FILE_SQL_EXT_DIR && mkdir -p $FILE_SQL_EXT_DIR
+
+--write_file $FILE_SQL_EXT_DIR/orders.csv
+order_id;customer;amount;paid;note
+1;alice;10.5;true;"first; with delimiter"
+2;bob;NA;false;NA
+3;alice;7;true;"line one
+line two"
+4;carol;20.25;false;"doubled ""quote"""
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/escapes.csv
+id,text
+1,"backslash \"escaped\" quote"
+2,"comma, inside"
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/types.csv
+i,d,b,mixed,dt,bad_date,big,neg,empty_col
+1,1.5,true,1,2026-01-01,2026-02-30,9223372036854775807,-9223372036854775808,
+2,2,FALSE,x,2026-01-02 03:04:05.123,2024-02-29,9223372036854775808,-1,
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/bad_rows.csv
+id,v
+1,10
+2
+3,30
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/unterminated.csv
+id,v
+1,"open
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/no_header.csv
+skipped line
+7,seven
+8,eight
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/customers.jsonl
+{"customer":"alice","city":"Hangzhou","since":"2020-01-01"}
+
+{"customer":"bob","city":"Beijing","vip":true}
+{"Customer":"carol","since":"2021-06-30","vip":false,"score":3}
+{"customer":"dave","score":"n/a"}
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/nested.jsonl
+{"a":1}
+{"a":[1,2]}
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/broken.jsonl
+{"a":1}
+{"a":2,}
+EOF
+
+--write_file $FILE_SQL_EXT_DIR/items.parquet.b64
+UEFSMRUEFUAVOEwVCBUAEgAAIAQBAAkBAAIJB0AAAwAAAAAAAAAEAAAAAAAAABUAFRQVGCwVCBUQ
+FQYVBhwYCAQAAAAAAAAAGAgBAAAAAAAAABYAKAgEAAAAAAAAABgIAQAAAAAAAAAAAAAKJAIAAAAI
+AQID5AAVBBUUFRhMFQQVABIAAAokAQAAAGEBAAAAYhUAFRIVFiwVCBUQFQYVBhw2AigBYhgBYQAA
+AAkgAgAAAAMLAQMCFQQVGBUcTBUGFQASAAAMLAEAAAADAAAABAAAABUAFRQVGCwVCBUQFQYVBhwY
+BAQAAAAYBAEAAAAWAigEBAAAABgEAQAAAAAAAAokAgAAAAMNAgMkABUEFTAVLEwVBhUAEgAAGAAA
+BQEE+D8FBygABEAAAAAAAAAQQBUAFRQVGCwVCBUQFQYVBhwYCAAAAAAAABBAGAgAAAAAAAD4PxYC
+KAgAAAAAAAAQQBgIAAAAAAAA+D8AAAAKJAIAAAADCwIDJAAVABUOFRIsFQgVABUGFQYcGAEBGAEA
+FgIoAQEYAQAAAAAHGAIAAAADBwUVBBUgFSRMFQgVABIAABA8ulAAALtQAAC8UAAAvVAAABUAFRQV
+GCwVCBUQFQYVBhwYBL1QAAAYBLpQAAAWACgEvVAAABgEulAAAAAAAAokAgAAAAgBAgPkABUEFUAV
+QEwVCBUAEgAAICgAhKyH+FcGAEDGuwUIPIAIy4f4VwYAwErah/hXBgAVABUUFRgsFQgVEBUGFQYc
+GAjAStqH+FcGABgIAISsh/hXBgAWACgIwErah/hXBgAYCACErIf4VwYAAAAACiQCAAAACAECA+QA
+FQQVQBU4TBUIFQASAAAgBAUACQEABgkHQAAHAAAAAAAAAAgAAAAAAAAAFQAVFBUYLBUIFRAVBhUG
+HBgICAAAAAAAAAAYCAUAAAAAAAAAFgAoCAgAAAAAAAAAGAgFAAAAAAAAAAAAAAokAgAAAAgBAgPk
+ABUEFR4VIkwVBhUAEgAADzgBAAAAYgEAAABhAQAAAGMVABUUFRgsFQgVEBUGFQYcNgIoAWMYAWEA
+AAAKJAIAAAADCwIDJAAVBBUYFRxMFQYVABIAAAwsBQAAAAcAAAAIAAAAFQAVFBUYLBUIFRAVBhUG
+HBgECAAAABgEBQAAABYCKAQIAAAAGAQFAAAAAAAACiQCAAAAAw0CAyQAFQQVMBUsTBUGFQASAAAY
+AAAFAQQVQAUHKAAYQAAAAAAAABxAFQAVFBUYLBUIFRAVBhUGHBgIAAAAAAAAHEAYCAAAAAAAABVA
+FgIoCAAAAAAAABxAGAgAAAAAAAAVQAAAAAokAgAAAAMHAgMkABUAFQ4VEiwVCBUAFQYVBhwYAQEY
+AQAWACgBARgBAAAAAAcYAgAAAAgBDRUEFSAVJEwVCBUAEgAAEDy+UAAAv1AAAMBQAADBUAAAFQAV
+FBUYLBUIFRAVBhUGHBgEwVAAABgEvlAAABYAKATBUAAAGAS+UAAAAAAACiQCAAAACAECA+QAFQQV
+QBVATBUIFQASAAAgKACN6Yf4VwYAQM/4BQg8gBEIiPhXBgDAUxeI+FcGABUAFRQVGCwVCBUQFQYV
+BhwYCMBTF4j4VwYAGAgAjemH+FcGABYAKAjAUxeI+FcGABgIAI3ph/hXBgAAAAAKJAIAAAAIAQID
+5AAVBBUgFSRMFQQVABIAABA8CQAAAAAAAAAKAAAAAAAAABUAFRIVFiwVBBUQFQYVBhwYCAoAAAAA
+AAAAGAgJAAAAAAAAABYAKAgKAAAAAAAAABgICQAAAAAAAAAAAAAJIAIAAAAEAQEDAhUEFRQVGEwV
+BBUAEgAACiQBAAAAYQEAAABiFQAVEhUWLBUEFRAVBhUGHDYAKAFiGAFhAAAACSACAAAABAEBAwIV
+BBUQFRRMFQQVABIAAAgcCQAAAAoAAAAVABUSFRYsFQQVEBUGFQYcGAQKAAAAGAQJAAAAFgAoBAoA
+AAAYBAkAAAAAAAAJIAIAAAAEAQEDAhUEFSAVJEwVBBUAEgAAEDwAAAAAAAAjQAAAAAAAACRAFQAV
+EhUWLBUEFRAVBhUGHBgIAAAAAAAAJEAYCAAAAAAAACNAFgAoCAAAAAAAACRAGAgAAAAAAAAjQAAA
+AAkgAgAAAAQBAQMCFQAVDhUSLBUEFQAVBhUGHBgBABgBABYCKAEAGAEAAAAABxgCAAAAAwIAFQQV
+EBUUTBUEFQASAAAIHMJQAADDUAAAFQAVEhUWLBUEFRAVBhUGHBgEw1AAABgEwlAAABYAKATDUAAA
+GATCUAAAAAAACSACAAAABAEBAwIVBBUgFSRMFQQVABIAABA8AJYmiPhXBgBA2DWI+FcGABUAFRIV
+FiwVBBUQFQYVBhwYCEDYNYj4VwYAGAgAliaI+FcGABYAKAhA2DWI+FcGABgIAJYmiPhXBgAAAAAJ
+IAIAAAAEAQEDAhUEGYw1ABgGc2NoZW1hFQ4AFQQlAhgCaWQAFQwlAhgDZ3JwJQBMHAAAABUCJQIY
+A3F0eQAVCiUCGAVwcmljZQAVACUCGAJvawAVAiUCGANkYXklDExsAAAAFQQlAhgCdHMlFEyMEhws
+AAAAAAAWFBk8GXwmABwVBBk1AAYQGRgCaWQVAhYIFuoBFuYBJlwmCBwYCAQAAAAAAAAAGAgBAAAA
+AAAAABYAKAgEAAAAAAAAABgIAQAAAAAAAAAAGSwVBBUAFQIAFQAVEBUCADwpBhkmAAgAAAAmABwV
+DBk1AAYQGRgDZ3JwFQIWCBZ4FoABJqICJu4BHDYCKAFiGAFhABksFQQVABUCABUAFRAVAgA8FgYZ
+BhkmAgYAAAAmABwVAhk1AAYQGRgDcXR5FQIWCBaiARaqASamAybuAhwYBAQAAAAYBAEAAAAWAigE
+BAAAABgEAQAAAAAZLBUEFQAVAgAVABUQFQIAPCkGGSYCBgAAACYAHBUKGTUABhAZGAVwcmljZRUC
+FggW2gEW2gEm4AQmmAQcGAgAAAAAAAAQQBgIAAAAAAAA+D8WAigIAAAAAAAAEEAYCAAAAAAAAPg/
+ABksFQQVABUCABUAFRAVAgA8KQYZJgIGAAAAJgAcFQAZJQYAGRgCb2sVAhYIFlAWVCbyBTwYAQEY
+AQAWAigBARgBAAAZHBUAFQAVAgA8KQYZJgIGAAAAJgAcFQIZNQAGEBkYA2RheRUCFggWqgEWsgEm
+hgcmxgYcGAS9UAAAGAS6UAAAFgAoBL1QAAAYBLpQAAAAGSwVBBUAFQIAFQAVEBUCADwpBhkmAAgA
+AAAmABwVBBk1AAYQGRgCdHMVAhYIFuoBFu4BJtQIJvgHHBgIwErah/hXBgAYCACErIf4VwYAFgAo
+CMBK2of4VwYAGAgAhKyH+FcGAAAZLBUEFQAVAgAVABUQFQIAPCkGGSYACAAAABbCCRYIJggW3gkA
+GXwmABwVBBk1AAYQGRgCaWQVAhYIFuoBFuYBJroKJuYJHBgICAAAAAAAAAAYCAUAAAAAAAAAFgAo
+CAgAAAAAAAAAGAgFAAAAAAAAAAAZLBUEFQAVAgAVABUQFQIAPCkGGSYACAAAACYAHBUMGTUABhAZ
+GANncnAVAhYIFoQBFowBJooMJswLHDYCKAFjGAFhABksFQQVABUCABUAFRAVAgA8FgYZBhkmAgYA
+AAAmABwVAhk1AAYQGRgDcXR5FQIWCBaiARaqASaQDSbYDBwYBAgAAAAYBAUAAAAWAigECAAAABgE
+BQAAAAAZLBUEFQAVAgAVABUQFQIAPCkGGSYCBgAAACYAHBUKGTUABhAZGAVwcmljZRUCFggW2gEW
+2gEmyg4mgg4cGAgAAAAAAAAcQBgIAAAAAAAAFUAWAigIAAAAAAAAHEAYCAAAAAAAABVAABksFQQV
+ABUCABUAFRAVAgA8KQYZJgIGAAAAJgAcFQAZJQYAGRgCb2sVAhYIFlAWVCbcDzwYAQEYAQAWACgB
+ARgBAAAZHBUAFQAVAgA8KQYZJgAIAAAAJgAcFQIZNQAGEBkYA2RheRUCFggWqgEWsgEm8BAmsBAc
+GATBUAAAGAS+UAAAFgAoBMFQAAAYBL5QAAAAGSwVBBUAFQIAFQAVEBUCADwpBhkmAAgAAAAmABwV
+BBk1AAYQGRgCdHMVAhYIFuoBFu4BJr4SJuIRHBgIwFMXiPhXBgAYCACN6Yf4VwYAFgAoCMBTF4j4
+VwYAGAgAjemH+FcGAAAZLBUEFQAVAgAVABUQFQIAPCkGGSYACAAAABbOCRYIJuYJFuoJABl8JgAc
+FQQZNQAGEBkYAmlkFQIWBBbIARbQASaQFCbQExwYCAoAAAAAAAAAGAgJAAAAAAAAABYAKAgKAAAA
+AAAAABgICQAAAAAAAAAAGSwVBBUAFQIAFQAVEBUCADwpBhkmAAQAAAAmABwVDBk1AAYQGRgDZ3Jw
+FQIWBBZ4FoABJtQVJqAVHDYAKAFiGAFhABksFQQVABUCABUAFRAVAgA8FgQZBhkmAAQAAAAmABwV
+Ahk1AAYQGRgDcXR5FQIWBBaYARagASbQFiagFhwYBAoAAAAYBAkAAAAWACgECgAAABgECQAAAAAZ
+LBUEFQAVAgAVABUQFQIAPCkGGSYABAAAACYAHBUKGTUABhAZGAVwcmljZRUCFgQWyAEW0AEmgBgm
+wBccGAgAAAAAAAAkQBgIAAAAAAAAI0AWACgIAAAAAAAAJEAYCAAAAAAAACNAABksFQQVABUCABUA
+FRAVAgA8KQYZJgAEAAAAJgAcFQAZJQYAGRgCb2sVAhYEFlAWVCaQGTwYAQAYAQAWAigBABgBAAAZ
+HBUAFQAVAgA8KQYZJgICAAAAJgAcFQIZNQAGEBkYA2RheRUCFgQWmAEWoAEmlBom5BkcGATDUAAA
+GATCUAAAFgAoBMNQAAAYBMJQAAAAGSwVBBUAFQIAFQAVEBUCADwpBhkmAAQAAAAmABwVBBk1AAYQ
+GRgCdHMVAhYEFsgBFtABJsQbJoQbHBgIQNg1iPhXBgAYCACWJoj4VwYAFgAoCEDYNYj4VwYAGAgA
+liaI+FcGAAAZLBUEFQAVAgAVABUQFQIAPCkGGSYABAAAABbQCBYEJtATFoQJABkcGAxBUlJPVzpz
+Y2hlbWEYmAQvLy8vLzRnQkFBQVFBQUFBQUFBS0FBd0FCZ0FGQUFnQUNnQUFBQUFCQkFBTUFBQUFD
+QUFJQUFBQUJBQUlBQUFBQkFBQUFBY0FBQUFrQVFBQTZBQUFBTGdBQUFDRUFBQUFYQUFBQURBQUFB
+QUVBQUFBQ1AvLy93QUFBUW9RQUFBQUZBQUFBQVFBQUFBQUFBQUFBZ0FBQUhSekFBQ0svLy8vQUFB
+Q0FERC8vLzhBQUFFSUVBQUFBQlFBQUFBRUFBQUFBQUFBQUFNQUFBQmtZWGtBc3YvLy93QUFBQUJZ
+Ly8vL0FBQUJCaEFBQUFBVUFBQUFCQUFBQUFBQUFBQUNBQUFBYjJzQUFJRC8vLzk4Ly8vL0FBQUJB
+eEFBQUFBY0FBQUFCQUFBQUFBQUFBQUZBQUFBY0hKcFkyVUFCZ0FJQUFZQUJnQUFBQUFBQWdDcy8v
+Ly9BQUFCQWhBQUFBQVVBQUFBQkFBQUFBQUFBQUFEQUFBQWNYUjVBSnovLy84QUFBQUJJQUFBQU5q
+Ly8vOEFBQUVGRUFBQUFCZ0FBQUFFQUFBQUFBQUFBQU1BQUFCbmNuQUFCQUFFQUFRQUFBQVFBQlFB
+Q0FBR0FBY0FEQUFBQUJBQUVBQUFBQUFBQVFJUUFBQUFIQUFBQUFRQUFBQUFBQUFBQWdBQUFHbGtB
+QUFJQUF3QUNBQUhBQWdBQUFBQUFBQUJRQUFBQUE9PQAYIHBhcnF1ZXQtY3BwLWFycm93IHZlcnNp
+b24gMjEuMC4wGXwcAAAcAAAcAAAcAAAcAAAcAAAcAAAAHAoAAFBBUjE=
+EOF
+--exec base64 -d < $FILE_SQL_EXT_DIR/items.parquet.b64 > $FILE_SQL_EXT_DIR/items.parquet
+
+set session enable_file_sql = ON;
+
+--echo # CSV options: delimiter, NULL text, quotes with delimiters, line breaks and escapes
+eval select order_id, customer, amount, paid, replace(note, char(10), '<NL>') as note
+       from read_csv('$FILE_SQL_EXT_DIR/orders.csv', delim = ';', nullstr = 'NA')
+      order by order_id;
+eval select * from read_csv('$FILE_SQL_EXT_DIR/escapes.csv', escape = '\\\\') order by id;
+eval select * from read_csv('$FILE_SQL_EXT_DIR/no_header.csv', header = false, skip = 1) t;
+
+--echo # deterministic type inference: widening, int64 bounds, invalid dates and all NULL columns
+eval describe select * from read_csv('$FILE_SQL_EXT_DIR/types.csv');
+eval select i, d, b, mixed, dt, bad_date, big, neg, empty_col from read_csv('$FILE_SQL_EXT_DIR/types.csv') order by i;
+
+--echo # malformed rows are reported with their line, or skipped with ignore_errors
+--replace_regex /file '[^']*'/file '<path>'/
+--error 11121
+eval select * from read_csv('$FILE_SQL_EXT_DIR/bad_rows.csv');
+eval select * from read_csv('$FILE_SQL_EXT_DIR/bad_rows.csv', ignore_errors = true) order by id;
+--replace_regex /file '[^']*'/file '<path>'/
+--error 11121
+eval select * from read_csv('$FILE_SQL_EXT_DIR/unterminated.csv');
+
+--echo # JSONL: union of keys in first-seen order, missing keys are NULL, conflicts become VARCHAR
+eval describe select * from read_ndjson('$FILE_SQL_EXT_DIR/customers.jsonl');
+eval select customer, city, since, vip, score from read_json('$FILE_SQL_EXT_DIR/customers.jsonl') order by customer;
+--replace_regex /file '[^']*'/file '<path>'/
+--error 11121
+eval select * from read_json('$FILE_SQL_EXT_DIR/nested.jsonl');
+--replace_regex /file '[^']*'/file '<path>'/
+--error 11121
+eval select * from read_json('$FILE_SQL_EXT_DIR/broken.jsonl');
+--error 1235
+eval select * from read_json('$FILE_SQL_EXT_DIR/customers.jsonl', format = 'array');
+
+--echo # Parquet: three row groups, nullable columns, projection of a subset of the columns
+eval describe select * from read_parquet('$FILE_SQL_EXT_DIR/items.parquet');
+eval select id, grp, qty, price, ok, day, ts from read_parquet('$FILE_SQL_EXT_DIR/items.parquet') order by id;
+eval select count(*), count(grp), sum(qty), round(sum(price), 2), sum(ok), min(day), max(ts)
+       from read_parquet('$FILE_SQL_EXT_DIR/items.parquet');
+
+--echo # single file SQL: expressions, filter, grouping, HAVING, ordering and LIMIT
+eval select grp, count(*) as n, sum(qty) as total, round(avg(price), 3) as avg_price
+       from read_parquet('$FILE_SQL_EXT_DIR/items.parquet') p
+      where id > 1 and grp is not null
+      group by grp having count(*) > 1
+      order by total desc limit 2;
+
+--echo # joins between files: inner, left and across formats, executed by the seekdb engine
+eval select o.order_id, o.customer, c.city
+       from read_csv('$FILE_SQL_EXT_DIR/orders.csv', delim = ';', nullstr = 'NA') o
+       join read_json('$FILE_SQL_EXT_DIR/customers.jsonl') c on o.customer = c.customer
+      order by o.order_id;
+eval select c.customer, count(o.order_id) as orders
+       from read_json('$FILE_SQL_EXT_DIR/customers.jsonl') c
+       left join read_csv('$FILE_SQL_EXT_DIR/orders.csv', delim = ';', nullstr = 'NA') o on o.customer = c.customer
+      group by c.customer order by c.customer;
+eval select p.id, p.grp, o.customer
+       from read_parquet('$FILE_SQL_EXT_DIR/items.parquet') p
+       join read_csv('$FILE_SQL_EXT_DIR/orders.csv', delim = ';', nullstr = 'NA') o on p.id = o.order_id
+      order by p.id;
+--replace_regex /value\(\[.*\]\)/value(<file>)/
+eval explain basic select count(*)
+       from read_parquet('$FILE_SQL_EXT_DIR/items.parquet') p
+       join read_csv('$FILE_SQL_EXT_DIR/orders.csv', delim = ';', nullstr = 'NA') o on p.id = o.order_id;
+
+--echo # COPY options and read back; an existing target is never replaced
+eval copy (select order_id, customer, amount, note
+             from read_csv('$FILE_SQL_EXT_DIR/orders.csv', delim = ';', nullstr = 'NA') order by order_id)
+       to '$FILE_SQL_EXT_DIR/orders_out.csv' (format csv, header, delimiter '|', nullstr '-');
+eval select order_id, customer, amount, replace(note, char(10), '<NL>') as note
+       from read_csv('$FILE_SQL_EXT_DIR/orders_out.csv', delim = '|', nullstr = '-') order by order_id;
+--error 1086
+eval copy (select 1 as x) to '$FILE_SQL_EXT_DIR/orders_out.csv';
+eval copy (select 1 as x) to '$FILE_SQL_EXT_DIR/no_header_out.csv' (header false);
+eval select * from read_csv('$FILE_SQL_EXT_DIR/no_header_out.csv', header = false);
+
+--echo # unknown options, options of another format, missing files and wrong formats
+--error 1235
+eval select * from read_csv('$FILE_SQL_EXT_DIR/types.csv', no_such_option = 1);
+--error 1235
+eval select * from read_parquet('$FILE_SQL_EXT_DIR/items.parquet', header = true);
+--error 1017
+eval select * from read_csv('$FILE_SQL_EXT_DIR/missing.csv');
+--replace_regex /file '[^']*'/file '<path>'/
+--error 11121
+eval select * from read_parquet('$FILE_SQL_EXT_DIR/types.csv');
+
+--echo # the feature switch also covers glob and COPY
+set session enable_file_sql = OFF;
+--error 1235
+eval select count(*) from glob('$FILE_SQL_EXT_DIR/*');
+--error 1235
+eval copy (select 1) to '$FILE_SQL_EXT_DIR/off.csv';
+set session enable_file_sql = ON;
+eval select substring_index(file, '/', -1) as file from glob('$FILE_SQL_EXT_DIR/*.csv') order by file;
+
+set session enable_file_sql = OFF;
+--exec rm -rf $FILE_SQL_EXT_DIR
+--enable_query_log

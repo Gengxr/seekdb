@@ -56,6 +56,11 @@ public:
                                 ObSqlPlanItem &plan_item) override;
   inline void set_table_type(MulModeTableType table_type) { table_type_ = table_type; }
   inline MulModeTableType get_table_type() { return table_type_; }
+  virtual const char *get_name() const override
+  {
+    return MulModeTableType::OB_FILE_TABLE_TYPE == table_type_ ? "FILE TABLE SCAN"
+                                                               : ObLogicalOperator::get_name();
+  }
   int set_namespace_arr(ObIArray<ObString> &namespace_arr);
   int get_namespace_arr(ObIArray<ObString> &namespace_arr);
   int64_t get_ns_size() { return namespace_arr_.count(); }

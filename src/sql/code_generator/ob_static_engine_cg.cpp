@@ -5572,6 +5572,13 @@ int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
 
     if (OB_FAIL(spec.dup_origin_column_defs(op.get_origin_cols_def()))) {
     }
+    // a file column that the query does not reference is not read
+    for (int64_t i = 0; OB_SUCC(ret) && MulModeTableType::OB_FILE_TABLE_TYPE == spec.table_type_
+         && i < spec.cols_def_.count(); ++i) {
+      if (COL_TYPE_FILE == spec.cols_def_.at(i)->col_type_) {
+        spec.cols_def_.at(i)->output_column_idx_ = -1;
+      }
+    }
 
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
