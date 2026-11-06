@@ -378,19 +378,28 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+namespace
+{
+// utf8mb4_bin orders strings by their bytes, so the range bounds are compared directly instead
+// of through the charset dispatch, which dominated dictionary lookups.
+OB_INLINE int compare_bin(const ObString &left, const ObString &right)
+{
+  const int32_t min_len = left.length() < right.length() ? left.length() : right.length();
+  int cmp = (min_len > 0) ? MEMCMP(left.ptr(), right.ptr(), min_len) : 0;
+  if (0 == cmp) {
+    cmp = (left.length() < right.length()) ? -1 : (left.length() > right.length() ? 1 : 0);
+  }
+  return cmp;
+}
+} // namespace
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
   for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
+    if (compare_bin(range_dicts_[i].start_.get_word(), single_word) <= 0
+        && compare_bin(range_dicts_[i].end_.get_word(), single_word) >= 0) {
       dict = range_dicts_[i].dict_;
       found = true;
     }

@@ -1,0 +1,217 @@
+drop database if exists fts_hot_path;
+create database fts_hot_path;
+use fts_hot_path;
+set names utf8mb4;
+# TOKENIZE keeps its output for both parsers and both IK modes
+select tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。', 'ik');
+tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。
+["技术", "一款", "是", "在", "显著", "场景", "下", "的", "全文索引", "开销", "内存", "分词器", "cpu", "数据结构", "热", "非常", "索引", "化", "池", "大量", "停", "实例", "等", "oceanbase", "可以", "单", "稳定", "复用", "数据库", "和", "包括", "查询", "优化", "路径", "用词", "降低", "文档", "全局", "解析器", "例"]
+select tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。', 'ik', '[{"output": "all"}]');
+tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。
+{"tokens": [{"技术": 1}, {"一款": 1}, {"是": 1}, {"在": 1}, {"显著": 1}, {"场景": 1}, {"下": 1}, {"的": 2}, {"全文索引": 1}, {"开销": 1}, {"内存": 1}, {"分词器": 1}, {"cpu": 1}, {"数据结构": 1}, {"热": 1}, {"非常": 1}, {"索引": 1}, {"化": 1}, {"池": 1}, {"大量": 1}, {"停": 1}, {"实例": 1}, {"等": 1}, {"oceanbase": 1}, {"可以": 1}, {"单": 1}, {"稳定": 1}, {"复用": 1}, {"数据库": 1}, {"和": 1}, {"包括": 1}, {"查询": 1}, {"优化": 1}, {"路径": 1}, {"用词": 1}, {"降低": 1}, {"文档": 1}, {"全局": 1}, {"解析器": 1}, {"例": 1}], "doc_len": 41}
+select tokenize('一千二百三十四万五千六百七十八点九 2026年11月6日 第三百零五号 二〇二六', 'ik');
+tokenize('一千二百三十四万五千六百七十八点九 2026年11月6日 第三百零五号 二〇二六', 'ik')
+["二六", "2026年", "二", "第", "三百零五号", "一千二百三十四万五千六百七十八", "11月", "6日", "九", "点"]
+select tokenize('壹佰贰拾叁 廿 卅 两千零一夜 十万八千里', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
+tokenize('壹佰贰拾叁 廿 卅 两千零一夜 十万八千里', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]')
+["两", "两千", "卅", "里", "十万八千里", "八千", "一夜", "千", "两千零一", "千里", "十万八千", "廿", "零", "壹佰贰拾叁", "十万"]
+select tokenize('The Quick BROWN fox jumps over the lazy dog. Full-Text Search requires efficient tokenization.', 'beng');
+tokenize('The Quick BROWN fox jumps over the lazy dog. Full-Text Search requires efficient tokenization.', 'beng')
+["lazy", "text", "efficient", "over", "tokenization", "quick", "full", "requires", "dog", "brown", "fox", "jumps", "search"]
+select tokenize('MiXeD Case 混合 CASE 大小写 ÉCOLE École', 'ik');
+tokenize('MiXeD Case 混合 CASE 大小写 ÉCOLE École', 'ik')
+["case", "大小写", "混合", "mixed", "cole"]
+# repeated calls reuse the cached dictionary loader
+select tokenize('全文索引 分词器', 'ik') = tokenize('全文索引 分词器', 'ik') as same_result;
+same_result
+1
+# utf8mb4_general_ci comparison: ASCII case folding, CJK, accents, padding and 4-byte characters
+create table words(id int primary key, w varchar(32) collate utf8mb4_general_ci, b varbinary(32));
+insert into words values
+(1, 'abc', 'abc'), (2, 'ABC', 'ABC'), (3, 'abd', 'abd'), (4, 'ab', 'ab'), (5, 'ab ', 'ab '),
+(6, '全文', '全文'), (7, '全文索引', '全文索引'), (8, '分词', '分词'), (9, '索引', '索引'),
+(10, 'école', 'école'), (11, 'ECOLE', 'ECOLE'), (12, 'Ecole', 'Ecole'), (13, '😀', '😀'),
+(14, '😃', '😃'), (15, 'a_b', 'a_b'), (16, 'a^b', 'a^b'), (17, 'aZb', 'aZb'), (18, '', ''),
+(19, '全文a', '全文a'), (20, '全文A', '全文A'), (21, 'zz', 'zz'), (22, '一', '一'), (23, '鿿', '鿿'),
+(24, '㐀', '㐀'), (25, 'x全', 'x全'), (26, 'X全', 'X全'), (27, '全 ', '全 ');
+select id, w from words order by w, id;
+id	w
+18	
+4	ab
+5	ab 
+1	abc
+2	ABC
+3	abd
+17	aZb
+16	a^b
+15	a_b
+10	école
+11	ECOLE
+12	Ecole
+25	x全
+26	X全
+21	zz
+24	㐀
+22	一
+27	全 
+6	全文
+19	全文a
+20	全文A
+7	全文索引
+8	分词
+9	索引
+23	鿿
+13	😀
+14	😃
+select id from words order by w desc, id;
+id
+13
+14
+23
+9
+8
+7
+19
+20
+6
+27
+22
+24
+21
+25
+26
+10
+11
+12
+15
+16
+17
+3
+1
+2
+4
+5
+18
+select id from words order by b, id;
+id
+18
+2
+11
+12
+26
+17
+16
+15
+4
+5
+1
+3
+25
+21
+10
+24
+22
+27
+6
+20
+19
+7
+8
+9
+23
+13
+14
+select w, count(*) from words group by w order by w, count(*);
+w	count(*)
+	1
+ab	2
+ABC	2
+abd	1
+aZb	1
+a^b	1
+a_b	1
+école	3
+X全	2
+zz	1
+㐀	1
+一	1
+全 	1
+全文	1
+全文a	2
+全文索引	1
+分词	1
+索引	1
+鿿	1
+😀	2
+select count(*) from words x join words y on x.w = y.w;
+count(*)
+43
+select count(*) from words x join words y on x.w < y.w;
+count(*)
+343
+select count(*) from words x join words y on x.b < y.b;
+count(*)
+351
+# full-text index build and MATCH queries
+create table docs(
+id bigint primary key,
+title varchar(128),
+content text,
+title_en varchar(128),
+content_en text,
+fulltext key fti_all_ik(title, content) with parser ik,
+fulltext key fti_en(title_en, content_en) with parser beng
+);
+insert into docs values
+(1, '全文索引', '全文索引的分词器把文本拆成词', 'Full Text', 'database performance audit trail'),
+(2, '分词器', '分词器热路径优化', 'Tokenizer', 'tokenizer hot path for the database'),
+(3, '数据库', 'OceanBase 是稳定的数据库', 'Database', 'a stable distributed database'),
+(4, '倒排索引', '倒排索引的构建和查询', 'Inverted Index', 'inverted index build and query'),
+(5, '无关', '今天天气很好', 'Weather', 'sunny weather today'),
+(6, '全文索引 分词器', '全文索引与分词器 全文索引', 'Audit', 'performance audit of the AUDIT log'),
+(7, 'OceanBase', 'oceanbase 稳定 高效', 'OceanBase', 'OceanBase database performance');
+select id from docs where match(title, content) against('全文索引 分词器') order by id;
+id
+1
+2
+6
+select count(*) from docs where match(title, content) against('全文索引 分词器');
+count(*)
+3
+select id from docs where match(title_en, content_en) against('database performance audit') order by id;
+id
+1
+2
+3
+6
+7
+select count(*) from docs where match(title_en, content_en) against('database performance audit');
+count(*)
+5
+select id from docs where match(title, content) against('OceanBase 稳定 database') order by id;
+id
+3
+7
+select count(*) from (select id from docs where match(title, content) against('全文索引 分词器') limit 2) t;
+count(*)
+2
+select id, round(match(title, content) against('全文索引 分词器'), 4) as score
+from docs where match(title, content) against('全文索引 分词器') order by score desc, id;
+id	score
+6	1.7445
+1	1.4225
+2	0.4021
+# a filter on the score is still evaluated as written
+select id from docs where match(title, content) against('全文索引 分词器') > 1 order by id;
+id
+1
+6
+# the index keeps working after DML
+update docs set content = '分词器' where id = 5;
+delete from docs where id = 1;
+select id from docs where match(title, content) against('全文索引 分词器') order by id;
+id
+2
+5
+6
+drop database fts_hot_path;

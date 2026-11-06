@@ -158,11 +158,35 @@ bool ObAddWord::is_min_max_word(const int64_t c_len) const
   return flag_.min_max_word() && (c_len < min_token_size_ || c_len > max_token_size_);
 }
 
+bool ObAddWord::is_lower_case_utf8mb4(const ObString &word) const
+{
+  // ASCII without upper case letters and CJK ideographs (U+4000..U+9FFF, three bytes) have no
+  // lower case mapping in utf8mb4 collations.
+  bool is_lower = (CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(word_meta_.get_collation_type()));
+  const unsigned char *str = reinterpret_cast<const unsigned char *>(word.ptr());
+  const int64_t len = word.length();
+  for (int64_t i = 0; is_lower && i < len; ) {
+    if (str[i] < 0x80) {
+      is_lower = !(str[i] >= 'A' && str[i] <= 'Z');
+      i += 1;
+    } else if (i + 2 < len && str[i] >= 0xE4 && str[i] <= 0xE9
+               && 0x80 == (str[i + 1] & 0xC0) && 0x80 == (str[i + 2] & 0xC0)) {
+      i += 3;
+    } else {
+      is_lower = false;
+    }
+  }
+  return is_lower;
+}
+
 int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (flag_.casedown() && is_lower_case_utf8mb4(src.get_word().get_string())) {
+    // lower-casing would copy the word unchanged
+    dst = src;
   } else if (flag_.casedown()) {
     ObString dst_str;
     if (OB_FAIL(ObCharset::tolower(

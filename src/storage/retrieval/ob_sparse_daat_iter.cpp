@@ -356,6 +356,11 @@ int ObSRDaaTIterImpl::filter_on_demand(const int64_t count, const double relevan
 
   if (!iter_param_->need_filter()) {
     need_project = true;
+  } else if (T_OP_BOOL == filter_expr->type_ && 1 == filter_expr->arg_cnt_
+             && filter_expr->args_[0] == relevance_proj_expr) {
+    // WHERE MATCH(...) AGAINST(...) keeps the documents whose relevance is not zero, which
+    // needs no expression evaluation per document
+    need_project = (0.0 != relevance);
   } else if (eval_ctx->is_vectorized()) {
     if (OB_UNLIKELY(count >= eval_ctx->max_batch_size_)) {
       ret = OB_ERR_UNEXPECTED;

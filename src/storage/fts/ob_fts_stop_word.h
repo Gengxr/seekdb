@@ -121,6 +121,7 @@ public:
 private:
   bool is_min_max_word(const int64_t c_len) const;
   int casedown_word(const ObFTWord &src, ObFTWord &dst);
+  bool is_lower_case_utf8mb4(const common::ObString &word) const;
   int check_stopword(const ObFTWord &word, bool &is_stopword);
   int groupby_word(const ObFTWord &word, const int64_t word_cnt);
 private:

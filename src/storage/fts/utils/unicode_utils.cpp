@@ -18,6 +18,7 @@
 
 #include "lib/charset/ob_charset_string_helper.h"
 #include "lib/utility/ob_macro_utils.h"
+#include <algorithm>
 
 namespace oceanbase
 {
@@ -173,12 +174,21 @@ bool ObUnicodeBlockUtils::is_unicode_cn_number(ob_wc_t unicode)
       OB_IK_GET_NUMBER_UNICODE("億"), OB_IK_GET_NUMBER_UNICODE("兆"),
       OB_IK_GET_NUMBER_UNICODE("卅"), OB_IK_GET_NUMBER_UNICODE("廿"),
   };
-  for (int i = 0; i < sizeof(cn_number_array) / sizeof(cn_number_array[0]); i++) {
-    if (unicode == cn_number_array[i]) {
-      return true;
+  // Every character is checked during IK segmentation, so search a sorted copy.
+  static const int64_t count = sizeof(cn_number_array) / sizeof(cn_number_array[0]);
+  struct SortedNumbers
+  {
+    SortedNumbers()
+    {
+      for (int64_t i = 0; i < count; i++) {
+        values_[i] = cn_number_array[i];
+      }
+      std::sort(values_, values_ + count);
     }
-  }
-  return false;
+    ob_wc_t values_[count];
+  };
+  static const SortedNumbers sorted;
+  return std::binary_search(sorted.values_, sorted.values_ + count, unicode);
 }
 
 } //  namespace storage

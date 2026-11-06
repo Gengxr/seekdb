@@ -373,11 +373,110 @@ struct ObDatumCollectionCmp : public ObDefined<>
 
 struct ObDatumStrCmpImpl
 {
+  // Charset of a collation, looked up once instead of on every comparison.
+  static OB_INLINE const ObCharsetInfo *get_charset_info(const ObCollationType cs)
+  {
+    static const ObCharsetInfo *infos[CS_TYPE_MAX] = {nullptr};
+    const ObCharsetInfo *info = nullptr;
+    if (OB_LIKELY(cs > CS_TYPE_INVALID && cs < CS_TYPE_MAX)) {
+      info = ATOMIC_LOAD(&infos[cs]);
+      if (OB_ISNULL(info) && OB_NOT_NULL(info = ObCharset::get_charset(cs))) {
+        ATOMIC_STORE(&infos[cs], info);
+      }
+    }
+    return info;
+  }
+  // Decodes an ASCII or a three-byte CJK ideograph (U+4000..U+9FFF) character, the characters of
+  // most full-text words; returns 0 for any other character.
+  static OB_INLINE int64_t decode_simple_char(const unsigned char *str, const int64_t len, ob_wc_t &wc)
+  {
+    int64_t char_len = 0;
+    if (str[0] < 0x80) {
+      wc = str[0];
+      char_len = 1;
+    } else if (len >= 3 && str[0] >= 0xE4 && str[0] <= 0xE9
+               && 0x80 == (str[1] & 0xC0) && 0x80 == (str[2] & 0xC0)) {
+      wc = (static_cast<ob_wc_t>(str[0] & 0x0F) << 12) | (static_cast<ob_wc_t>(str[1] & 0x3F) << 6)
+           | static_cast<ob_wc_t>(str[2] & 0x3F);
+      char_len = 3;
+    }
+    return char_len;
+  }
+  // utf8mb4_general_ci compares the weights its case table assigns to each character, exactly as
+  // ob_strnncollsp_utf8mb4 does. Simple characters are compared here; the first other character,
+  // or the end of either string where end space padding applies, is left to the collation.
+  static OB_INLINE bool cmp_general_ci_prefix(const ObCharsetInfo &info,
+                                              const unsigned char *l, const int64_t l_len,
+                                              const unsigned char *r, const int64_t r_len,
+                                              int64_t &pos, int &cmp_ret)
+  {
+    bool decided = false;
+    bool stop = false;
+    const ObUnicaseInfo *uni_plane = info.caseinfo;
+    pos = 0;
+    while (!decided && !stop && pos < l_len && pos < r_len) {
+      ob_wc_t l_wc = 0;
+      ob_wc_t r_wc = 0;
+      const int64_t l_char_len = decode_simple_char(l + pos, l_len - pos, l_wc);
+      const int64_t r_char_len = decode_simple_char(r + pos, r_len - pos, r_wc);
+      if (0 == l_char_len || 0 == r_char_len || l_wc > uni_plane->maxchar || r_wc > uni_plane->maxchar) {
+        stop = true;
+      } else {
+        const ObUnicaseInfoChar *l_page = uni_plane->page[l_wc >> 8];
+        const ObUnicaseInfoChar *r_page = uni_plane->page[r_wc >> 8];
+        const bool lower_sort = (info.state & OB_CS_LOWER_SORT);
+        if (nullptr != l_page) {
+          l_wc = lower_sort ? l_page[l_wc & 0xFF].tolower : l_page[l_wc & 0xFF].sort;
+        }
+        if (nullptr != r_page) {
+          r_wc = lower_sort ? r_page[r_wc & 0xFF].tolower : r_page[r_wc & 0xFF].sort;
+        }
+        if (l_wc != r_wc) {
+          cmp_ret = l_wc > r_wc ? 1 : -1;
+          decided = true;
+        } else if (l_char_len != r_char_len) {
+          stop = true;
+        } else {
+          pos += l_char_len;
+        }
+      }
+    }
+    return decided;
+  }
   static int OB_INLINE cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret,
                            const ObCollationType cs, const bool with_end_space)
   {
-    cmp_ret = ObCharset::strcmpsp(cs, l.ptr_, l.len_, r.ptr_, r.len_, with_end_space);
-    cmp_ret = cmp_ret > 0 ? 1 : (cmp_ret < 0 ? -1 : 0);
+    if (l.len_ == r.len_ && (l.ptr_ == r.ptr_ || 0 == MEMCMP(l.ptr_, r.ptr_, l.len_))) {
+      // identical bytes are equal under every collation; sorts of repeated keys, such as the
+      // words of a full-text index, compare many of them
+      cmp_ret = 0;
+    } else if (CS_TYPE_BINARY == cs) {
+      // binary collation is a plain byte comparison, e.g. the doc ids merged by text retrieval
+      const int32_t min_len = MIN(l.len_, r.len_);
+      cmp_ret = (min_len > 0) ? MEMCMP(l.ptr_, r.ptr_, min_len) : 0;
+      if (0 == cmp_ret) {
+        cmp_ret = (l.len_ < r.len_) ? -1 : (l.len_ > r.len_ ? 1 : 0);
+      } else {
+        cmp_ret = cmp_ret > 0 ? 1 : -1;
+      }
+    } else {
+      const ObCharsetInfo *info = get_charset_info(cs);
+      if (OB_LIKELY(OB_NOT_NULL(info) && OB_NOT_NULL(l.ptr_) && OB_NOT_NULL(r.ptr_))) {
+        const unsigned char *l_str = reinterpret_cast<const unsigned char *>(l.ptr_);
+        const unsigned char *r_str = reinterpret_cast<const unsigned char *>(r.ptr_);
+        int64_t pos = 0;
+        if (CS_TYPE_UTF8MB4_GENERAL_CI == cs && OB_NOT_NULL(info->caseinfo)
+            && cmp_general_ci_prefix(*info, l_str, l.len_, r_str, r.len_, pos, cmp_ret)) {
+        } else {
+          // the characters before pos have equal weights, so the rest decides
+          cmp_ret = info->coll->strnncollsp(info, l_str + pos, l.len_ - pos, r_str + pos, r.len_ - pos,
+                                            with_end_space);
+        }
+      } else {
+        cmp_ret = ObCharset::strcmpsp(cs, l.ptr_, l.len_, r.ptr_, r.len_, with_end_space);
+      }
+      cmp_ret = cmp_ret > 0 ? 1 : (cmp_ret < 0 ? -1 : 0);
+    }
     return OB_SUCCESS;
   }
 };

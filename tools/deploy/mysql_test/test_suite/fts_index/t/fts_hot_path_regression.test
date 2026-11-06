@@ -1,0 +1,75 @@
+# owner: database-competition
+# owner group: storage
+# description: results of the full-text hot paths that were optimized: IK dictionary lookup,
+#              word lower-casing, string comparison in the index build sort, the MATCH filter
+#              of text retrieval, and binary doc id comparison.
+
+--disable_warnings
+drop database if exists fts_hot_path;
+--enable_warnings
+create database fts_hot_path;
+use fts_hot_path;
+set names utf8mb4;
+
+--echo # TOKENIZE keeps its output for both parsers and both IK modes
+select tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。', 'ik');
+select tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。', 'ik', '[{"output": "all"}]');
+select tokenize('一千二百三十四万五千六百七十八点九 2026年11月6日 第三百零五号 二〇二六', 'ik');
+select tokenize('壹佰贰拾叁 廿 卅 两千零一夜 十万八千里', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
+select tokenize('The Quick BROWN fox jumps over the lazy dog. Full-Text Search requires efficient tokenization.', 'beng');
+select tokenize('MiXeD Case 混合 CASE 大小写 ÉCOLE École', 'ik');
+--echo # repeated calls reuse the cached dictionary loader
+select tokenize('全文索引 分词器', 'ik') = tokenize('全文索引 分词器', 'ik') as same_result;
+
+--echo # utf8mb4_general_ci comparison: ASCII case folding, CJK, accents, padding and 4-byte characters
+create table words(id int primary key, w varchar(32) collate utf8mb4_general_ci, b varbinary(32));
+insert into words values
+  (1, 'abc', 'abc'), (2, 'ABC', 'ABC'), (3, 'abd', 'abd'), (4, 'ab', 'ab'), (5, 'ab ', 'ab '),
+  (6, '全文', '全文'), (7, '全文索引', '全文索引'), (8, '分词', '分词'), (9, '索引', '索引'),
+  (10, 'école', 'école'), (11, 'ECOLE', 'ECOLE'), (12, 'Ecole', 'Ecole'), (13, '😀', '😀'),
+  (14, '😃', '😃'), (15, 'a_b', 'a_b'), (16, 'a^b', 'a^b'), (17, 'aZb', 'aZb'), (18, '', ''),
+  (19, '全文a', '全文a'), (20, '全文A', '全文A'), (21, 'zz', 'zz'), (22, '一', '一'), (23, '鿿', '鿿'),
+  (24, '㐀', '㐀'), (25, 'x全', 'x全'), (26, 'X全', 'X全'), (27, '全 ', '全 ');
+select id, w from words order by w, id;
+select id from words order by w desc, id;
+select id from words order by b, id;
+select w, count(*) from words group by w order by w, count(*);
+select count(*) from words x join words y on x.w = y.w;
+select count(*) from words x join words y on x.w < y.w;
+select count(*) from words x join words y on x.b < y.b;
+
+--echo # full-text index build and MATCH queries
+create table docs(
+  id bigint primary key,
+  title varchar(128),
+  content text,
+  title_en varchar(128),
+  content_en text,
+  fulltext key fti_all_ik(title, content) with parser ik,
+  fulltext key fti_en(title_en, content_en) with parser beng
+);
+insert into docs values
+  (1, '全文索引', '全文索引的分词器把文本拆成词', 'Full Text', 'database performance audit trail'),
+  (2, '分词器', '分词器热路径优化', 'Tokenizer', 'tokenizer hot path for the database'),
+  (3, '数据库', 'OceanBase 是稳定的数据库', 'Database', 'a stable distributed database'),
+  (4, '倒排索引', '倒排索引的构建和查询', 'Inverted Index', 'inverted index build and query'),
+  (5, '无关', '今天天气很好', 'Weather', 'sunny weather today'),
+  (6, '全文索引 分词器', '全文索引与分词器 全文索引', 'Audit', 'performance audit of the AUDIT log'),
+  (7, 'OceanBase', 'oceanbase 稳定 高效', 'OceanBase', 'OceanBase database performance');
+select id from docs where match(title, content) against('全文索引 分词器') order by id;
+select count(*) from docs where match(title, content) against('全文索引 分词器');
+select id from docs where match(title_en, content_en) against('database performance audit') order by id;
+select count(*) from docs where match(title_en, content_en) against('database performance audit');
+select id from docs where match(title, content) against('OceanBase 稳定 database') order by id;
+select count(*) from (select id from docs where match(title, content) against('全文索引 分词器') limit 2) t;
+select id, round(match(title, content) against('全文索引 分词器'), 4) as score
+  from docs where match(title, content) against('全文索引 分词器') order by score desc, id;
+--echo # a filter on the score is still evaluated as written
+select id from docs where match(title, content) against('全文索引 分词器') > 1 order by id;
+
+--echo # the index keeps working after DML
+update docs set content = '分词器' where id = 5;
+delete from docs where id = 1;
+select id from docs where match(title, content) against('全文索引 分词器') order by id;
+
+drop database fts_hot_path;
