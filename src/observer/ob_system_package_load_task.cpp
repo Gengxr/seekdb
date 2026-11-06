@@ -90,22 +90,23 @@ int ObSystemPackageLoadTask::load_system_package_()
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(GET_ADMIN_JOB_COUNT(LOAD_MYSQL_SYS_PACKAGE, job_count))) {
   } else if (0 == job_count) {
-    // job not exists, try insert inprogress job
-    if (OB_FAIL(ADMIN_JOB_CREATE_WITH_RET(job_id, JOB_TYPE_LOAD_MYSQL_SYS_PACKAGE))) {
-    }
+    // Create the in-progress job and load its packages in this timer run.
+    ret = ADMIN_JOB_CREATE_WITH_RET(job_id, JOB_TYPE_LOAD_MYSQL_SYS_PACKAGE);
   } else if (OB_FAIL(ADMIN_JOB_FIND(LOAD_MYSQL_SYS_PACKAGE, job_id))) {
     if (ret == OB_ENTRY_NOT_EXIST) {
       ret = OB_SUCCESS;
       GCTX.sys_package_ready_ = true;
       LOG_INFO("find a success job or job_id not exist", KR(ret), K(job_id));
-    } else {
     }
-  } else if (OB_FAIL(pl::ObPLPackageManager::load_all_common_sys_package(
-                         *sql_proxy,
-                         false/*from_file*/))) {
-  } else if (OB_FAIL(ADMIN_JOB_COMPLETE(job_id, 0/*result_code*/))) {
-  } else {
-    GCTX.sys_package_ready_ = true;
+  }
+  if (OB_SUCC(ret) && !GCTX.sys_package_ready_) {
+    if (OB_FAIL(pl::ObPLPackageManager::load_all_common_sys_package(
+                           *sql_proxy,
+                           false/*from_file*/))) {
+    } else if (OB_FAIL(ADMIN_JOB_COMPLETE(job_id, 0/*result_code*/))) {
+    } else {
+      GCTX.sys_package_ready_ = true;
+    }
   }
   return ret;
 }
