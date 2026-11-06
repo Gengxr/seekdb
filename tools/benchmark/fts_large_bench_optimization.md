@@ -11,6 +11,7 @@ macOS `sample`. Self time and inclusive time were aggregated per function.
 | `TOKENIZE(..., 'ik')` | `ObGenDicLoader::get_dic_loader` took a global `TCRWLock` write lock on every call (≈9%); IK dictionary lookups searched their ranges with `ObCharset::strcmp` (≈13%); latch-protected hash maps that only one thread uses (≈5%) |
 | Index build | the sort of `(word, doc id)` rows: string comparison was 30–45% of the build, and the `ObCharset::strcmpsp` wrapper (argument checks and charset lookup) cost almost as much as the collation itself |
 | `MATCH` queries | the pushed-down `MATCH` filter was evaluated through the expression engine for every document; doc id comparisons in the posting list merge went through the charset layer |
+| Fixed DDL latency | a one-row `ADD FULLTEXT INDEX` took 530 ms. An INFO-level trace showed the build threads of each aux index idling up to the 50 ms condition timeout after the dag finished, and the statement polling for completion every 100 ms |
 
 ## Changes
 
@@ -23,6 +24,8 @@ macOS `sample`. Self time and inclusive time were aggregated per function.
 | Binary search for Chinese number characters | `storage/fts/utils/unicode_utils.cpp` | was a linear scan per character |
 | String comparison: equal bytes are equal; binary collation is a `memcmp`; the charset is cached; `utf8mb4_general_ci` compares ASCII and CJK ideographs with its own weight table and leaves other characters to the collation | `share/datum/ob_datum_cmp_func_def.h` | faster sort comparisons in index builds and doc id merges, same results |
 | A bare `WHERE MATCH(...) AGAINST(...)` keeps documents with non-zero relevance without evaluating the filter expression | `storage/retrieval/ob_sparse_daat_iter.cpp` | no expression evaluation per document; other filters are still evaluated |
+| Wake the threads of an independent dag when it finishes | `storage/scheduler/ob_independent_dag.cpp` | no 50 ms timeout wait per build stage |
+| Poll for DDL completion from 1 ms, doubling up to 100 ms | `sql/engine/cmd/ob_ddl_executor_util.cpp` | the statement returns soon after the DDL task finishes |
 
 None of the changes alters tokenization rules, input data or the benchmark.
 
@@ -33,15 +36,17 @@ None of the changes alters tokenization rules, input data or the benchmark.
 
 | Metric | Before | After | Change |
 |---|---:|---:|---:|
-| build_ik_all_sec | 2.786 | 2.139 | -23.2% |
-| build_ik_content_sec | 2.055 | 1.646 | -19.9% |
-| build_beng_en_sec | 1.136 | 0.938 | -17.4% |
-| tokenize_ik_avg_ms | 0.0706 | 0.0607 | -14.0% |
-| tokenize_beng_avg_ms | 0.0446 | 0.0419 | -6.1% |
-| query_cn_avg_ms | 0.9526 | 0.8701 | -8.7% |
-| query_beng_avg_ms | 1.4133 | 1.2494 | -11.6% |
-| query_mixed_avg_ms | 1.0604 | 0.9648 | -9.0% |
-| query_limit_avg_ms | 1.2272 | 1.1065 | -9.8% |
+| build_ik_all_sec | 2.786 | 1.966 | -29.4% |
+| build_ik_content_sec | 2.055 | 1.566 | -23.8% |
+| build_beng_en_sec | 1.136 | 0.862 | -24.1% |
+| tokenize_ik_avg_ms | 0.0706 | 0.0608 | -13.9% |
+| tokenize_beng_avg_ms | 0.0446 | 0.0414 | -7.2% |
+| query_cn_avg_ms | 0.9526 | 0.8488 | -10.9% |
+| query_beng_avg_ms | 1.4133 | 1.2438 | -12.0% |
+| query_mixed_avg_ms | 1.0604 | 0.9533 | -10.1% |
+| query_limit_avg_ms | 1.2272 | 1.0973 | -10.6% |
+
+A one-row `ADD FULLTEXT INDEX` went from 530 ms to 355 ms.
 
 Query hit counts are unchanged (8001, 11000, 7332, 20).
 

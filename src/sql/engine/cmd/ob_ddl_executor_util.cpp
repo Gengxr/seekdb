@@ -58,7 +58,8 @@ int ObDDLExecutorUtil::wait_ddl_finish(const int64_t task_id,
     const bool is_support_cancel)
 {
   int ret = OB_SUCCESS;
-  const int64_t retry_interval = 100 * 1000;
+  // short DDLs finish within a few milliseconds, so poll quickly at first and back off to 100ms
+  int64_t retry_interval = 1000;
   ObAddr unused_addr;
   bool is_table_exist = false;
   int64_t unused_user_msg_len = 0;
@@ -117,6 +118,7 @@ int ObDDLExecutorUtil::wait_ddl_finish(const int64_t task_id,
           FORWARD_USER_ERROR(ret, "DDL execution status is undecided, please check later if it finishes successfully or not.");
         } else {
           ob_usleep(retry_interval);
+          retry_interval = MIN(retry_interval * 2, 100 * 1000);
         }
       }
     }
@@ -172,7 +174,8 @@ int ObDDLExecutorUtil::wait_ddl_retry_task_finish(const int64_t task_id,
 {
   int ret = OB_SUCCESS;
   affected_rows = 0;
-  const int64_t retry_interval = 100 * 1000;
+  // short DDLs finish within a few milliseconds, so poll quickly at first and back off to 100ms
+  int64_t retry_interval = 1000;
   ObAddr unused_addr;
   bool is_table_exist = false;
   int64_t forward_user_msg_len = 0;
@@ -246,6 +249,7 @@ int ObDDLExecutorUtil::wait_ddl_retry_task_finish(const int64_t task_id,
           FORWARD_USER_ERROR(ret, "DDL execution status is undecided, please check later if it finishes successfully or not.");
         } else {
           ob_usleep(retry_interval);
+          retry_interval = MIN(retry_interval * 2, 100 * 1000);
         }
       }
     }

@@ -464,6 +464,12 @@ int ObIndependentDag::deal_with_finish_task(
     if (inner_has_finished()) {
       ObIDag::ObDagStatus status = is_dag_failed() ? ObIDag::DAG_STATUS_ABORT : ObIDag::DAG_STATUS_FINISH;
       set_dag_status(status);
+      // the other threads of this dag wait for ready tasks; wake them up to exit now instead of
+      // after the wait timeout
+      ObThreadCondGuard guard(cond_);
+      if (OB_TMP_FAIL(cond_.broadcast())) {
+        COMMON_LOG(WARN, "failed to wake up dag threads", K(tmp_ret));
+      }
       COMMON_LOG(INFO, "dag finished", K(ret), K_(dag_ret), K(status), "runtime", ObTimeUtility::fast_current_time() - start_time_, KPC(this));
     }
   }
