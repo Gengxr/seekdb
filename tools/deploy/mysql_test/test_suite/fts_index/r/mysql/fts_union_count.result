@@ -1,0 +1,108 @@
+drop database if exists fts_union_count;
+create database fts_union_count;
+use fts_union_count;
+create table docs (id bigint primary key, body text, fulltext key idx (body) with parser beng);
+insert into docs values
+(1, 'alpha beta gamma'), (2, 'alpha'), (3, 'beta beta'), (4, 'gamma delta'),
+(5, null), (6, ''), (7, 'delta epsilon alpha'), (8, 'epsilon');
+select count(*) from docs;
+count(*)
+4096
+# unranked count and ids equal the ranked retrieval
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('alpha beta');
+count(*)	sum(id)	bit_xor(id)
+2048	4192768	0
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('alpha beta');
+count(*)	sum(id)	bit_xor(id)
+2048	4192768	0
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('alpha beta') s from docs where match(body) against('alpha beta')) t;
+count(*)	sum(id)	bit_xor(id)
+2048	4192768	0
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('alpha alpha alpha');
+count(*)	sum(id)	bit_xor(id)
+1536	3144704	0
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('alpha alpha alpha');
+count(*)	sum(id)	bit_xor(id)
+1536	3144704	0
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('alpha alpha alpha') s from docs where match(body) against('alpha alpha alpha')) t;
+count(*)	sum(id)	bit_xor(id)
+1536	3144704	0
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('gamma delta epsilon');
+count(*)	sum(id)	bit_xor(id)
+2048	4196352	4096
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('gamma delta epsilon');
+count(*)	sum(id)	bit_xor(id)
+2048	4196352	4096
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('gamma delta epsilon') s from docs where match(body) against('gamma delta epsilon')) t;
+count(*)	sum(id)	bit_xor(id)
+2048	4196352	4096
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('beta zeta');
+count(*)	sum(id)	bit_xor(id)
+1024	2095104	0
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('beta zeta');
+count(*)	sum(id)	bit_xor(id)
+1024	2095104	0
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('beta zeta') s from docs where match(body) against('beta zeta')) t;
+count(*)	sum(id)	bit_xor(id)
+1024	2095104	0
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('zeta');
+count(*)	sum(id)	bit_xor(id)
+0	NULL	0
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('zeta');
+count(*)	sum(id)	bit_xor(id)
+0	NULL	0
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('zeta') s from docs where match(body) against('zeta')) t;
+count(*)	sum(id)	bit_xor(id)
+0	NULL	0
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('alpha beta gamma delta epsilon');
+count(*)	sum(id)	bit_xor(id)
+3072	6291968	4096
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('alpha beta gamma delta epsilon');
+count(*)	sum(id)	bit_xor(id)
+3072	6291968	4096
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('alpha beta gamma delta epsilon') s from docs where match(body) against('alpha beta gamma delta epsilon')) t;
+count(*)	sum(id)	bit_xor(id)
+3072	6291968	4096
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('epsilon');
+count(*)	sum(id)	bit_xor(id)
+1024	2100736	4096
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+from docs where match(body) against('epsilon');
+count(*)	sum(id)	bit_xor(id)
+1024	2100736	4096
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('epsilon') s from docs where match(body) against('epsilon')) t;
+count(*)	sum(id)	bit_xor(id)
+1024	2100736	4096
+# boolean mode keeps its own semantics
+select count(*), sum(id) from docs where match(body) against('+alpha -beta' in boolean mode);
+count(*)	sum(id)
+1024	2097664
+select count(*), sum(id)
+from (select id, match(body) against('+alpha -beta' in boolean mode) s
+from docs where match(body) against('+alpha -beta' in boolean mode)) t;
+count(*)	sum(id)
+1024	2097664
+# the union stays correct after DML
+delete from docs where id % 3 = 0;
+update docs set body = 'zeta' where id % 5 = 0;
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('alpha zeta');
+count(*)	sum(id)	bit_xor(id)
+1365	2794825	2187
+select count(*), sum(id), bit_xor(id)
+from (select id, match(body) against('alpha zeta') s from docs where match(body) against('alpha zeta')) t;
+count(*)	sum(id)	bit_xor(id)
+1365	2794825	2187
+drop database fts_union_count;

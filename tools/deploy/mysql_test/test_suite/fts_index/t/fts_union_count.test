@@ -1,0 +1,57 @@
+# owner: database-competition
+# owner group: storage
+# description: a MATCH whose relevance is not used counts the union of the posting lists; its
+#              documents must be the ones the ranked retrieval returns, across batch borders.
+
+--disable_warnings
+drop database if exists fts_union_count;
+--enable_warnings
+create database fts_union_count;
+use fts_union_count;
+create table docs (id bigint primary key, body text, fulltext key idx (body) with parser beng);
+insert into docs values
+  (1, 'alpha beta gamma'), (2, 'alpha'), (3, 'beta beta'), (4, 'gamma delta'),
+  (5, null), (6, ''), (7, 'delta epsilon alpha'), (8, 'epsilon');
+--disable_query_log
+let $i = 9;
+while ($i)
+{
+  insert into docs select id + (select max(id) from docs), body from docs;
+  dec $i;
+}
+--enable_query_log
+select count(*) from docs;
+
+--echo # unranked count and ids equal the ranked retrieval
+let $q = 7;
+while ($q)
+{
+  if ($q == 7) { let $words = alpha beta; }
+  if ($q == 6) { let $words = alpha alpha alpha; }
+  if ($q == 5) { let $words = gamma delta epsilon; }
+  if ($q == 4) { let $words = beta zeta; }
+  if ($q == 3) { let $words = zeta; }
+  if ($q == 2) { let $words = alpha beta gamma delta epsilon; }
+  if ($q == 1) { let $words = epsilon; }
+  eval select count(*), sum(id), bit_xor(id) from docs where match(body) against('$words');
+  eval select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*), sum(id), bit_xor(id)
+         from docs where match(body) against('$words');
+  eval select count(*), sum(id), bit_xor(id)
+         from (select id, match(body) against('$words') s from docs where match(body) against('$words')) t;
+  dec $q;
+}
+
+--echo # boolean mode keeps its own semantics
+select count(*), sum(id) from docs where match(body) against('+alpha -beta' in boolean mode);
+select count(*), sum(id)
+  from (select id, match(body) against('+alpha -beta' in boolean mode) s
+          from docs where match(body) against('+alpha -beta' in boolean mode)) t;
+
+--echo # the union stays correct after DML
+delete from docs where id % 3 = 0;
+update docs set body = 'zeta' where id % 5 = 0;
+select count(*), sum(id), bit_xor(id) from docs where match(body) against('alpha zeta');
+select count(*), sum(id), bit_xor(id)
+  from (select id, match(body) against('alpha zeta') s from docs where match(body) against('alpha zeta')) t;
+
+drop database fts_union_count;

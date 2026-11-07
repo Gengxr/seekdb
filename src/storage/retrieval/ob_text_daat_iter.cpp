@@ -35,12 +35,63 @@ int ObTextDaaTIter::init(const ObTextDaaTParam &param)
   } else {
     mode_flag_ = param.mode_flag_;
     function_lookup_mode_ = param.function_lookup_mode_;
+    // a count of the matching documents needs only the union of the posting lists
+    union_only_ = !param.base_param_->need_project_relevance() && !param.base_param_->need_filter()
+                  && !function_lookup_mode_ && param.relevance_collector_->accepts_single_match();
+  }
+  return ret;
+}
+
+int ObTextDaaTIter::do_one_merge_round(int64_t &count)
+{
+  return union_only_ ? do_one_union_round(count) : ObSRDaaTIterImpl::do_one_merge_round(count);
+}
+
+int ObTextDaaTIter::do_one_union_round(int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  // advance the iterators whose current id was returned by the previous round
+  for (int64_t i = 0; OB_SUCC(ret) && i < next_round_cnt_; ++i) {
+    const int64_t iter_idx = next_round_iter_idxes_[i];
+    ObISRDaaTDimIter *dim_iter = dim_iters_->at(iter_idx);
+    if (OB_FAIL(dim_iter->get_next_row())) {
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+        iter_domain_ids_[iter_idx] = nullptr;
+      }
+    } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[iter_idx]))) {
+    }
+  }
+  // the smallest current id is the next result, every iterator positioned on it moves on
+  const ObDatum *min_id = nullptr;
+  next_round_cnt_ = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < dim_iters_->count(); ++i) {
+    const ObDatum *id = iter_domain_ids_[i];
+    int cmp = 0;
+    if (OB_ISNULL(id)) {
+    } else if (OB_ISNULL(min_id)) {
+      min_id = id;
+      next_round_iter_idxes_[next_round_cnt_++] = i;
+    } else if (OB_FAIL(merge_cmp_.cmp_datum(*id, *min_id, cmp))) {
+    } else if (cmp < 0) {
+      min_id = id;
+      next_round_cnt_ = 0;
+      next_round_iter_idxes_[next_round_cnt_++] = i;
+    } else if (0 == cmp) {
+      next_round_iter_idxes_[next_round_cnt_++] = i;
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(min_id)) {
+    ret = OB_ITER_END;
+  } else if (OB_FAIL(cache_result(count, *min_id, 0.0))) {
   }
   return ret;
 }
 
 void ObTextDaaTIter::reset()
 {
+  union_only_ = false;
   bm25_param_estimator_.reset();
   // this class can know the type of dim_iters_, but ObSRDaaTIterImpl maybe not
   if (OB_NOT_NULL(dim_iters_)) {
