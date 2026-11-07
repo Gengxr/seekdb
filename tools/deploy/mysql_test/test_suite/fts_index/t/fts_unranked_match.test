@@ -12,4 +12,10 @@ select count(*) from docs where match(body) against('alpha beta');
 select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*) from docs where match(body) against('alpha');
 select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*) from docs where match(body) against('zeta');
 
+--echo # LIMIT and OFFSET affect cardinality. A consumer that reads a row still observes its ordering.
+select count(*) from (select id from docs where match(body) against('alpha beta') limit 2 offset 2) t;
+select count(*) from (select id from docs where match(body) against('alpha beta') limit 2 offset 4) t;
+select count(*) from (select id from docs where match(body) against('alpha beta') limit 0) t;
+select count(*) from (select id from docs where match(body) against('alpha beta') order by id desc limit 1) t where id = 3;
+
 drop database fts_unranked_match;

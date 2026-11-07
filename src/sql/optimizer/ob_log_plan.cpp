@@ -12048,7 +12048,8 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
     } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
     }
     if (OB_SUCC(ret) && get_stmt()->is_select_stmt() && get_stmt()->is_single_table_stmt()
-        && static_cast<const ObSelectStmt *>(get_stmt())->is_scala_group_by()
+        && !table_scan->get_index_back() && !get_stmt()->has_for_update()
+        && (static_cast<const ObSelectStmt *>(get_stmt())->is_scala_group_by() || get_stmt()->has_limit())
         && !get_stmt()->has_order_by() && get_stmt()->get_condition_size() == 1
         && get_stmt()->get_condition_expr(0) == match_pred
         && match_against->get_mode_flag() == NATURAL_LANGUAGE_MODE

@@ -178,8 +178,9 @@ int ObTransformPreProcess::transform_one_stmt(common::ObIArray<ObParentDMLStmt> 
       }
     }
     if (OB_SUCC(ret)) {
+      const ObDMLStmt *parent = parent_stmts.empty() ? nullptr : parent_stmts.at(parent_stmts.count() - 1).stmt_;
       if (stmt->get_match_exprs().count() > 0 &&
-          OB_FAIL(preserve_order_for_fulltext_search(stmt, is_happened))) {
+          OB_FAIL(preserve_order_for_fulltext_search(stmt, parent, is_happened))) {
       } else {
         trans_happened |= is_happened;
       }
@@ -3790,7 +3791,8 @@ int ObTransformPreProcess::do_flatten_conditions(ObDMLStmt *stmt, ObIArray<ObRaw
 
 // full-text index queries on a single base table are processed with order preservation. 
 // (Order is not preserved in multi-table join scenarios.)
-int ObTransformPreProcess::preserve_order_for_fulltext_search(ObDMLStmt *stmt, bool& trans_happened)
+int ObTransformPreProcess::preserve_order_for_fulltext_search(
+    ObDMLStmt *stmt, const ObDMLStmt *parent, bool &trans_happened)
 {
   int ret = OB_SUCCESS;
   trans_happened = false;
@@ -3937,10 +3939,49 @@ int ObTransformPreProcess::preserve_order_for_fulltext_search(ObDMLStmt *stmt, b
     }
   }
   if (OB_SUCC(ret) && nullptr != match_expr && !static_cast<ObMatchFunRawExpr*>(match_expr)->is_es_match()) {
-    OrderItem item(match_expr, default_desc_direction());
-    if (OB_FAIL(stmt->add_order_item(item))) {
+    bool count_only = false;
+    const ObMatchFunRawExpr *match = static_cast<const ObMatchFunRawExpr *>(match_expr);
+    if (stmt->is_select_stmt() && parent != nullptr && parent->is_select_stmt()
+        && stmt->get_limit_expr() != nullptr && !stmt->is_fetch_with_ties() && !stmt->is_calc_found_rows()
+        && !stmt->has_for_update() && !stmt->is_contains_assignment()
+        && match->get_mode_flag() == NATURAL_LANGUAGE_MODE && match->get_columns_boosts().empty()
+        && stmt->get_condition_size() == 1 && stmt->get_condition_expr(0)->get_expr_type() == T_OP_BOOL
+        && stmt->get_condition_expr(0)->get_param_expr(0) == match_expr) {
+      ObSelectStmt *view = static_cast<ObSelectStmt *>(stmt);
+      const ObSelectStmt *consumer = static_cast<const ObSelectStmt *>(parent);
+      const TableItem *source = consumer->is_single_table_stmt() ? consumer->get_table_item(0) : nullptr;
+      if (source != nullptr && source->is_generated_table() && source->ref_query_ == view
+          && !consumer->is_set_stmt() && consumer->get_condition_size() == 0
+          && !consumer->has_having() && !consumer->has_order_by()
+          && consumer->get_column_items().empty() && consumer->is_scala_group_by()
+          && consumer->get_aggr_item_size() == 1 && consumer->get_select_item_size() == 1) {
+        const ObAggFunRawExpr *aggregate = consumer->get_aggr_item(0);
+        count_only = consumer->get_select_item(0).expr_ == aggregate
+            && aggregate->get_expr_type() == T_FUN_COUNT && aggregate->get_real_param_count() == 0;
+        for (int64_t i = 0; count_only && i < view->get_select_item_size(); ++i) {
+          const ObRawExpr *item = view->get_select_item(i).expr_;
+          count_only = item->is_column_ref_expr() || item->is_const_raw_expr();
+        }
+      }
+    }
+    if (count_only) {
+      // Only the number of rows surviving LIMIT is observable. The view
+      // needs neither its original projections nor implicit ranking.
+      ObConstRawExpr *dummy = nullptr;
+      if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*ctx_->expr_factory_, ObIntType, 1, dummy))) {
+      } else {
+        ObSelectStmt *view = static_cast<ObSelectStmt *>(stmt);
+        for (int64_t i = 0; i < view->get_select_item_size(); ++i) {
+          view->get_select_item(i).expr_ = dummy;
+        }
+        trans_happened = true;
+      }
     } else {
-      trans_happened = true;
+      OrderItem item(match_expr, default_desc_direction());
+      if (OB_FAIL(stmt->add_order_item(item))) {
+      } else {
+        trans_happened = true;
+      }
     }
   } 
   return ret;

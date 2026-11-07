@@ -16,4 +16,17 @@ count(*)
 select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*) from docs where match(body) against('zeta');
 count(*)
 0
+# LIMIT and OFFSET affect cardinality. A consumer that reads a row still observes its ordering.
+select count(*) from (select id from docs where match(body) against('alpha beta') limit 2 offset 2) t;
+count(*)
+1
+select count(*) from (select id from docs where match(body) against('alpha beta') limit 2 offset 4) t;
+count(*)
+0
+select count(*) from (select id from docs where match(body) against('alpha beta') limit 0) t;
+count(*)
+0
+select count(*) from (select id from docs where match(body) against('alpha beta') order by id desc limit 1) t where id = 3;
+count(*)
+1
 drop database fts_unranked_match;
