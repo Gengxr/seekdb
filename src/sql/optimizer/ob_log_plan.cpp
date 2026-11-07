@@ -12047,6 +12047,37 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
     if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
     } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
     }
+    if (OB_SUCC(ret) && get_stmt()->is_select_stmt() && get_stmt()->is_single_table_stmt()
+        && static_cast<const ObSelectStmt *>(get_stmt())->is_scala_group_by()
+        && !get_stmt()->has_order_by() && get_stmt()->get_condition_size() == 1
+        && get_stmt()->get_condition_expr(0) == match_pred
+        && match_against->get_mode_flag() == NATURAL_LANGUAGE_MODE
+        && match_against->get_columns_boosts().empty()
+        && !table_scan->is_vec_adaptive_scan() && !table_scan->is_vec_idx_scan_post_filter()
+        && match_pred->get_expr_type() == T_OP_BOOL && match_pred->get_param_count() == 1
+        && match_pred->get_param_expr(0) == match_against) {
+      ObSEArray<ObRawExpr *, 8> relation_exprs;
+      if (OB_FAIL(get_stmt()->get_relation_exprs(relation_exprs))) {
+      } else {
+        bool needs_score = false;
+        int64_t filter_refs = 0;
+        for (int64_t i = 0; !needs_score && i < relation_exprs.count(); ++i) {
+          const ObRawExpr *expr = relation_exprs.at(i);
+          if (expr == match_pred) {
+            ++filter_refs;
+          } else if (expr->has_flag(IS_MATCH_EXPR) || expr->has_flag(CNT_MATCH_EXPR)) {
+            needs_score = true;
+          }
+        }
+        if (!needs_score && filter_refs == 1) {
+          // Natural-language postings have positive term frequencies and
+          // BM25 clamps the query weight above zero. A bare MATCH predicate
+          // therefore needs the posting union, without computing its score.
+          tr_info.need_calc_relevance_ = false;
+          tr_info.pushdown_match_filter_ = nullptr;
+        }
+      }
+    }
   }
 
   for (int64_t i = 0; OB_SUCC(ret) && i < all_match_filters.count(); ++i) {

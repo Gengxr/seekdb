@@ -32,11 +32,18 @@ int ObTextTaaTIter::init(const ObTextTaaTParam &param)
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(mem_context_, mem_param))) {
   } else if (OB_FAIL(ObSRTaaTIterImpl::init(*param.base_param_, *param.dim_iter_, *param.allocator_))) {
-  } else if (OB_FAIL(bm25_param_estimator_.init(param.bm25_param_est_ctx_))) {
+  } else if (param.base_param_->need_project_relevance()
+             && OB_FAIL(bm25_param_estimator_.init(param.bm25_param_est_ctx_))) {
   } else {
     query_tokens_ = param.query_tokens_;
     mode_flag_ = param.mode_flag_;
     function_lookup_mode_ = param.function_lookup_mode_;
+    if (!iter_param_->need_project_relevance()) {
+      const int64_t doc_cnt = param.bm25_param_est_ctx_.estimated_total_doc_cnt_;
+      partition_cnt_ = doc_cnt > 0
+          ? MIN((doc_cnt - 1) / OB_HASHMAP_DEFAULT_SIZE + 1, OB_MAX_HASHMAP_COUNT)
+          : OB_MAX_HASHMAP_COUNT;
+    }
   }
   return ret;
 }
@@ -63,7 +70,9 @@ void ObTextTaaTIter::reuse(const bool switch_tablet)
 int ObTextTaaTIter::pre_process()
 {
   int ret = OB_SUCCESS;
-  if (iter_param_->need_project_relevance()) {
+  if (query_tokens_->empty()) {
+    ret = OB_ITER_END;
+  } else if (iter_param_->need_project_relevance()) {
     const bool is_first_estimation = !bm25_param_estimator_.is_estimated();
     if (!is_first_estimation) {
       // skip

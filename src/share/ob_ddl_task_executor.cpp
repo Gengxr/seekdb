@@ -15,6 +15,8 @@
  */
 
 #include "ob_ddl_task_executor.h"
+#include "lib/alloc/alloc_func.h"
+#include "lib/cpu/ob_cpu_topology.h"
 #include "lib/ob_running_mode.h"
 #include "lib/thread/ob_thread_name.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
@@ -350,7 +352,14 @@ int ObDDLLocalBuilder::push_task(ObAsyncTask &task)
 
 int64_t ObDDLLocalBuilder::get_thread_cnt_() const
 {
-  return lib::is_mini_mode() ? 1 : 16;
+  if (!lib::is_mini_mode()) {
+    return 16;
+  }
+  // Allow independent auxiliary indexes to build together while leaving
+  // CPU and memory capacity for foreground SQL on small deployments.
+  const int64_t cpu_slots = common::get_cpu_count() / 2;
+  const int64_t memory_slots = lib::get_memory_budget() / (2L << 30);
+  return MAX(1L, MIN(2L, MIN(cpu_slots, memory_slots)));
 }
 
 }  // end namespace share

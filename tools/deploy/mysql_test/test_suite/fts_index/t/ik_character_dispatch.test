@@ -1,0 +1,69 @@
+# owner: database-competition
+# owner group: storage
+# description: Preserve IK character categories and processor dispatch semantics.
+# tags: fts,ik,regression
+
+set names utf8mb4;
+
+--echo # ASCII connectors, decimal punctuation and Chinese word boundaries
+set @tokens = tokenize('Hello-World abc@example.com 1,234.50 99中文', 'ik');
+select json_length(@tokens) = 5 and
+       json_contains(@tokens, '["hello-world","abc@example.com","1,234.50","99","中文"]') as exact_tokens;
+
+--echo # Fullwidth letters/numbers, ideographic space and non-ASCII digits
+set @tokens = tokenize('ＡＢＣ１２３ ｘｙｚ　Alpha-42 ١٢٣', 'ik');
+select json_length(@tokens) = 3 and
+       json_contains(@tokens, '["ａｂｃ１２３","ｘｙｚ","alpha-42"]') as exact_tokens;
+
+--echo # CJK categories, supplementary codepoints and mixed identifiers
+set @tokens = tokenize('数据库🧪支持中文・カタカナ・한글，abc123_foo！', 'ik');
+select json_length(@tokens) = 10 and
+       json_contains(@tokens, '["数据库","支持","中文","・","カ","タ","ナ","한","글","abc123_foo"]') as exact_tokens;
+
+--echo # Smart and max-word modes keep their existing segmentation
+set @tokens = tokenize('中华人民共和国人民大会堂', 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
+select json_length(@tokens) = 2 and
+       json_contains(@tokens, '["中华人民共和国","人民大会堂"]') as exact_tokens;
+set @tokens = tokenize('中华人民共和国人民大会堂', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
+select json_length(@tokens) = 14 and
+       json_contains(@tokens, '["大会","人民大会堂","大会堂","共和国","人民大会","人民共和国","中华人民","共和","会堂","中华","中华人民共和国","国人","华人","人民"]') as exact_tokens;
+
+--echo # Repeated tokens preserve deduplication and category boundaries
+set @tokens = tokenize(concat(repeat('abc ', 200), '数据库 中文 123XYZ') collate utf8mb4_bin, 'ik');
+select json_length(@tokens) = 4 and
+       json_contains(@tokens, '["abc","数据库","中文","123xyz"]') as exact_tokens;
+
+--echo # Completed words survive a segmentation batch boundary
+set @tokens = tokenize(concat(repeat('abc ', 1001), '数据库 中文 123XYZ') collate utf8mb4_bin, 'ik');
+select json_contains(@tokens, '["abc","数据库","中文","123xyz"]') as required_tokens;
+
+--disable_warnings
+drop table if exists ik_character_dispatch;
+--enable_warnings
+create table ik_character_dispatch (
+  id int primary key,
+  body varchar(1000),
+  fulltext index ft(body) with parser ik
+);
+insert into ik_character_dispatch values
+  (1, '数据库 Alpha123 hello-world'),
+  (2, '中文 Beta456 abc@example.com');
+
+--echo # The same tokenization is used for index construction and MATCH
+select id from ik_character_dispatch
+ where match(body) against ('数据库' in boolean mode) order by id;
+select id from ik_character_dispatch
+ where match(body) against ('Alpha123' in boolean mode) order by id;
+update ik_character_dispatch set body = '中文 Gamma789' where id = 1;
+select count(*) as old_token_count from ik_character_dispatch
+ where match(body) against ('Alpha123' in boolean mode);
+select id from ik_character_dispatch
+ where match(body) against ('Gamma789' in boolean mode) order by id;
+begin;
+update ik_character_dispatch set body = '数据库 Delta123' where id = 1;
+rollback;
+select id from ik_character_dispatch
+ where match(body) against ('Gamma789' in boolean mode) order by id;
+select count(*) as rolled_back_token_count from ik_character_dispatch
+ where match(body) against ('Delta123' in boolean mode);
+drop table ik_character_dispatch;

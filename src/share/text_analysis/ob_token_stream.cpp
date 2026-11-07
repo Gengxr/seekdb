@@ -95,10 +95,15 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
   } else {
     const char *doc = input_doc_->ptr_;
     const uint32_t doc_len = get_input_buf_len();
+    const bool is_utf8mb4 = cs_->cset == &ob_charset_utf8mb4_handler;
+    const auto char_length = [&](const char *pos) {
+      return is_utf8mb4 && static_cast<unsigned char>(*pos) < 0x80
+          ? 1U : ob_mbcharlen_ptr(cs_, pos, doc + doc_len);
+    };
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = char_length(doc + trav_pos_);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +117,7 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = char_length(doc + trav_pos_);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -136,10 +141,8 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
 bool ObTextWhitespaceTokenizer::found_delimiter()
 {
-  bool found = false;
-  const char *curr_char = input_doc_->ptr_ + trav_pos_;
-  found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
-  return found;
+  const unsigned char byte = static_cast<unsigned char>(input_doc_->ptr_[trav_pos_]);
+  return nullptr != cs_->ctype && (cs_->ctype[1 + byte] & (_MY_SPC | _MY_CTR | _MY_PNT));
 }
 
 ObTokenNormalizer::ObTokenNormalizer()
@@ -244,7 +247,6 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
   } else {
     next_token.reset();
     token_freq = 0;
-    norm_allocator_.reuse();
     ObDatum tmp_datum;
     bool found_alnum = false;
     uint32_t norm_token_len = 0;
@@ -294,10 +296,26 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
       ret = OB_ERR_UNEXPECTED;
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
-      ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      // The UTF-8 case table can prove that an ASCII token needs no conversion.
+      const ObUnicaseInfo *case_info = cs_->caseinfo;
+      bool unchanged = cs_->cset == &ob_charset_utf8mb4_handler && nullptr != case_info
+          && case_info->maxchar >= 0x7f && nullptr != case_info->page[0];
+      if (unchanged) {
+        const ObUnicaseInfoChar *ascii_case = case_info->page[0];
+        for (uint32_t i = 0; unchanged && i < norm_token_len; ++i) {
+          const unsigned char byte = static_cast<unsigned char>(norm_token_ptr[i]);
+          unchanged = byte < 0x80 && ascii_case[byte].tolower == byte;
+        }
+      }
+      if (unchanged) {
+        next_token.set_string(norm_alnum_token);
       } else {
-        next_token.set_string(norm_lower_token);
+        norm_allocator_.reuse();
+        ObString norm_lower_token;
+        if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+        } else {
+          next_token.set_string(norm_lower_token);
+        }
       }
     }
   }
