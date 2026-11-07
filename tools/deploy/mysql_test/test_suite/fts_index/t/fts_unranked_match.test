@@ -1,0 +1,15 @@
+--disable_warnings
+drop database if exists fts_unranked_match;
+--enable_warnings
+create database fts_unranked_match;
+use fts_unranked_match;
+create table docs (id bigint primary key, body text, fulltext key idx (body) with parser beng);
+insert into docs values (1,'alpha beta'),(2,'alpha'),(3,'beta'),(4,'gamma'),(5,null),(6,'');
+
+--echo # A bare MATCH count uses the same posting union in row and batch execution.
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*) from docs where match(body) against('alpha beta');
+select count(*) from docs where match(body) against('alpha beta');
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*) from docs where match(body) against('alpha');
+select /*+ OPT_PARAM('ROWSETS_MAX_ROWS', 0) */ count(*) from docs where match(body) against('zeta');
+
+drop database fts_unranked_match;
