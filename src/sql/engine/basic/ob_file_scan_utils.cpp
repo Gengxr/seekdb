@@ -1069,6 +1069,10 @@ int ObFileSchemaInferer::infer(ObIAllocator &allocator, ObFileScanOptions &optio
     ret = ObFileSqlUtil::report_error(options.path_, 0, "no columns found");
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+    if (ObFileColType::NULL_TYPE == columns.at(i).type_) {
+      // a column without any value can only hold NULL
+      columns.at(i).nullable_ = true;
+    }
     if (ObFileColType::VARCHAR == columns.at(i).type_
         && columns.at(i).max_length_ > ObFileSqlLimits::MAX_VARCHAR_LENGTH) {
       ret = ObFileSqlUtil::report_error(options.path_, 0, "a value of column '%.*s' is longer than %ld bytes",
