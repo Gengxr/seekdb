@@ -1,0 +1,203 @@
+{
+  "meta": {
+    "schema": "agent-learning-evidence-v3-unbounded",
+    "task": "2026 年 OceanBase 数据库大赛加赛 · 赛题一：完成一个轻量向量数据库 (MiniVectorDB)",
+    "team": "果宝特攻队",
+    "student": "何恩驰",
+    "language": "zh-CN",
+    "synthetic": false,
+    "redaction": "hk 账号的系统管理密码已脱敏为 <redacted>；仓库内网地址、会话 trace 等与学习判断无关的内容未收录。",
+    "note": "本文件只收录本次会话中真实出现过的用户发言、Agent 动作和实际命令输出。Agent 的规划、代码和解释单独标注为 assistant/tool，不作为学生学习证据。"
+  },
+  "source_and_scope": {
+    "scope": "2026-11-09 本次会话：从交接文档开始，读完官方题面与公开题包，在 VIT 服务器上完成实现、构建镜像、跑公开用例与性能自测，最后推送到团队仓库提交评测。",
+    "materials": [
+      "D:\\Grad_Studies\\lessons\\白秀秀前沿数据库\\OceanBase比赛\\MiniVectorDB_交接说明.md（用户提供的交接上下文）",
+      "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6（官方题面，用户在第 1 轮问答中给出的唯一协议来源）",
+      "oceanbase/seekdb 分支 2026-competition-round2 的 mysqltest/（20 个公开用例）"
+    ],
+    "record_ids": "记录编号 u* 为用户发言，a* 为 Agent 发言，e* 为工具执行记录。"
+  },
+  "user_prompts": [
+    {
+      "id": "u1",
+      "kind": "user_turn",
+      "content": "读一下，完成题目\"D:\\Grad_Studies\\lessons\\白秀秀前沿数据库\\OceanBase比赛\\MiniVectorDB_交接说明.md\""
+    },
+    {
+      "id": "u2",
+      "kind": "handover_document",
+      "role": "user_provided_context",
+      "content": "用户已明确要求：MiniVectorDB 的编译、运行、Docker 镜像构建和测试在服务器进行。不要继续在 Windows 本机启动或修复 Docker Desktop。此前误启动过本机 Docker Desktop，启动报错；它没有用于本题构建或测试。"
+    },
+    {
+      "id": "u3",
+      "kind": "handover_document",
+      "role": "user_provided_context",
+      "content": "ssh xjtu_vit：同一台 VIT 服务器的 henchi 账号，用于日常开发、编译、测试。用户明确确认 henchi 没有 sudo 权限。ssh vit_hk：该服务器的 hk 账号。用户明确确认 hk 有 sudo 权限。"
+    },
+    {
+      "id": "u4",
+      "kind": "user_turn",
+      "question": "官方题包只给了 20 个公开用例（.test/.result），但没给测试驱动，所以「stdin/stdout 的报文格式、就绪标识、错误码名称、exact/ann 切换方式」目前只能靠推断。你手上有这个题包/协议说明吗？",
+      "content": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6"
+    },
+    {
+      "id": "u5",
+      "kind": "user_turn",
+      "question": "服务器上 henchi 没有 sudo，hk 的 sudo 需要密码，我不能非交互安装 Docker。正式镜像由平台构建，但本地不装 Docker 就没法验证 Dockerfile 能否构建成功。怎么处理？",
+      "content": "sudo 密码<redacted>（hk 的）"
+    },
+    {
+      "id": "u6",
+      "kind": "user_turn",
+      "question": "提交物要放到团队仓库 Gengxr/seekdb 的 2026-competition-round2 分支（目前还不存在），提测时填 repo URL + 分支 + commit SHA。我可以用本机已登录的 Xiurrra 账号推。今天怎么走？",
+      "content": "直接正式提测一次，拿平台反馈"
+    },
+    {
+      "id": "u7",
+      "kind": "handover_document",
+      "role": "user_provided_context",
+      "content": "用户偏好：中文交流；一次处理一个赛题；缺少的依赖可以自行从可靠来源获取；必须完成真实构建、测试和可提交材料，不能用演示替代正式实现。区分已经验证、尚未验证和仅计划完成的内容。系统级安装或需要交互式密码时，让用户在其自己的终端操作。"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "c1",
+      "topic": "协议来源的判断",
+      "turns": [
+        {
+          "id": "a1",
+          "role": "assistant",
+          "content": "官方题包只给了 20 个公开用例（.test/.result），但没给测试驱动，所以报文格式、就绪标识、错误码名称、exact/ann 切换方式目前只能靠推断。你手上有这个题包/协议说明吗？"
+        },
+        {
+          "id": "u4",
+          "role": "user",
+          "content": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6"
+        }
+      ],
+      "reading": "学生没有提供驱动或额外协议说明，只把官方题面重新指认为唯一权威来源；这等于确认「协议细节只以官方文档为准，其它渠道的说法不能当真」，也否定了从第三方提交里抄格式的做法。"
+    },
+    {
+      "id": "c2",
+      "topic": "服务器权限与系统级安装的边界",
+      "turns": [
+        {
+          "id": "u3",
+          "role": "user",
+          "content": "ssh xjtu_vit：同一台 VIT 服务器的 henchi 账号，用于日常开发、编译、测试。用户明确确认 henchi 没有 sudo 权限。ssh vit_hk：该服务器的 hk 账号。用户明确确认 hk 有 sudo 权限。"
+        },
+        {
+          "id": "a2",
+          "role": "assistant",
+          "content": "服务器上 henchi 没有 sudo，hk 的 sudo 需要密码，我不能非交互安装 Docker。正式镜像由平台构建，但本地不装 Docker 就没法验证 Dockerfile 能否构建成功。怎么处理？"
+        },
+        {
+          "id": "u5",
+          "role": "user",
+          "content": "sudo 密码<redacted>（hk 的）"
+        }
+      ],
+      "reading": "学生主动把「哪个账号有什么权限」讲清楚，并在被追问后才交出 hk 的管理密码，授权范围限于让 Agent 用 hk 完成系统级安装，没有把 henchi 提权。"
+    },
+    {
+      "id": "c3",
+      "topic": "提交策略",
+      "turns": [
+        {
+          "id": "a3",
+          "role": "assistant",
+          "content": "今天怎么走？"
+        },
+        {
+          "id": "u6",
+          "role": "user",
+          "content": "直接正式提测一次，拿平台反馈"
+        }
+      ],
+      "reading": "在协议未知的情况下，学生选择用一次正式提测换平台反馈，而不是无限期本地打磨；这是把「信息不足」当成要用实验解决的成本问题。"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "e1",
+      "title": "公开用例 20/20",
+      "command": "python3 tests/run_public_cases.py --binary build/minivectordb --cases <官方 mysqltest 目录>",
+      "output": "[PASS] sql_crud ... [PASS] transaction_shutdown_rollback  20/20 cases passed",
+      "interpretation": "按题面约定逐条发送 SQL 并按 1e-5 容差比较 JSON 断言，题包自带的 20 个用例（95 条 SQL）全部通过，覆盖建表、增删改查、排序、并列、主键冲突、Unicode、BIGINT 精度、非法语句、重启、精确检索、事务提交/回滚/失败原子性/关闭回滚。"
+    },
+    {
+      "id": "e2",
+      "title": "SIGKILL 崩溃恢复",
+      "command": "python3 tests/crash_test.py build/minivectordb",
+      "output": "case 1 committed rows survive SIGKILL: ok (50 rows) / case 2 uncommitted transaction leaves nothing behind: ok / case 3 multi-row autocommit statement is atomic under SIGKILL: ok (600 rows) / case 4 kill during recovery converges: ok",
+      "interpretation": "已提交数据在强杀后保留；未提交事务的插入和更新都不生效；600 行的一次性插入要么全在要么全不在；恢复途中连续三次强杀后仍能一致恢复。"
+    },
+    {
+      "id": "e3",
+      "title": "数据量大于内存预算",
+      "command": "python3 tests/large_data.py build/minivectordb 120000 128 8",
+      "output": "write: 120000 rows x 128 dims in 5.54s, data 65.6 MB, peak rss 23.6 MB, cache budget 8 MB / restart: first query 109.5 ms, vector top5 8.9 ms, peak rss 79.4 MB / PASS",
+      "interpretation": "数据 65.6 MB、缓存预算 8 MB 时，写入阶段峰值 RSS 23.6 MB，说明没有把全量数据塞进内存；重启后能直接查到行，向量 Top5 8.9 ms。"
+    },
+    {
+      "id": "e4",
+      "title": "首次性能自测（优化前）",
+      "command": "python3 tests/bench.py --binary build/minivectordb --skip-recall",
+      "output": "\"write_seconds\": 0.6341, \"query_seconds\": 1.2566, \"query_per_second\": 795.8, \"peak_rss_mb\": 13.2",
+      "interpretation": "1000 次 TopK 要 1.26 秒，明显慢于预期；排查发现新建表没有设置 cached 标志，扫描全部走 pread 读缓冲而不是内存 arena。"
+    },
+    {
+      "id": "e5",
+      "title": "修正缓存标志后复测",
+      "command": "同上，修改 create_table 后重建并复测",
+      "output": "\"write_seconds\": 0.5214, \"query_seconds\": 0.3131, \"query_per_second\": 3194.2, \"peak_rss_mb\": 21.3",
+      "interpretation": "查询从 1.26 秒降到 0.31 秒（4 倍），代价是内存从 13 MB 升到 21 MB。此时 1000 次查询要扫 5.6 MB × 1000 ≈ 5.6 GB，0.31 秒相当于 18 GB/s，已经接近内存带宽，所以没有再上近似索引。"
+    },
+    {
+      "id": "e6",
+      "title": "fsync 成本测量",
+      "command": "服务器上 64 KB 写入 + fsync 20 次取中位数",
+      "output": "fsync median ms 83.447 min 66.818 max 150.081",
+      "interpretation": "数据盘一次 fsync 的中位数远高于写入本身，说明批量写入的耗时主要由每次提交落盘决定；题面要求提交成功前必须完成持久化，所以这部分不能省，只能承认它是写路径的下限。"
+    },
+    {
+      "id": "e7",
+      "title": "容器镜像构建与冒烟",
+      "command": "DOCKER_BUILDKIT=1 docker build -t minivectordb:latest . && docker run --rm -i -v /var/tmp/mvd-smoke:/data --cpus=2 --memory=2g minivectordb:latest",
+      "output": "naming to docker.io/library/minivectordb:latest done / minivectordb:latest 118MB / {\"columns\":[\"id\",\"d\"],\"rows\":[[2,0.000000],[1,5.000000]]} / container_rc=0",
+      "interpretation": "两阶段 Dockerfile 能从源码构建成功，镜像内二进制在 2 核 2 GB 限制下按 stdin/stdout 协议正确返回结果。"
+    }
+  ],
+  "retrospective": {
+    "student_decisions_that_changed_the_work": [
+      {
+        "id": "r1",
+        "content": "把「在哪台机器上做」定死为服务器，直接否掉了本机 Docker Desktop 这条错误路线；后面所有编译、镜像构建、用例和压测都在 VIT 上做。",
+        "evidence": ["u2"]
+      },
+      {
+        "id": "r2",
+        "content": "把账号权限事实讲清楚（henchi 无 sudo、hk 有 sudo），让系统级安装有明确的授权路径，而不需要 Agent 去猜或让 henchi 越权。",
+        "evidence": ["u3", "u5"]
+      },
+      {
+        "id": "r3",
+        "content": "在协议未公开的情况下选择用一次正式提测换平台反馈，把「协议到底长什么样」当成实验问题而不是文档问题。",
+        "evidence": ["u6"]
+      }
+    ],
+    "what_the_agent_did": "读完题面和公开题包后，判断协议层是唯一不确定项，于是把输出格式做成可切换的一层（JSON 每语句一行 / 制表符文本），实现 C++20 存储与执行引擎，跑通 20 个公开用例、崩溃恢复、大于内存数据和性能自测，构建并验证 Docker 镜像。",
+    "known_gaps": [
+      "官方测试驱动没有公开，报文格式仍是从 .result 的 JSON 断言反推的，需要平台反馈才能确认。",
+      "CREATE VECTOR INDEX 只记录元数据，ann 模式仍返回精确结果，没有做真正的近似加速。",
+      "Agent prompt 材料目前主要来自交接文档和三轮问答，学生自己的验证/复测证据还不多。"
+    ]
+  },
+  "limitations": [
+    "本文件不含隐藏用例、平台日志或任何未真实执行的实验；标注为计划的内容没有写成结果。",
+    "性能数据来自本机服务器自测，评测机硬件与 cgroup 配置不同，不能直接当作平台成绩。",
+    "协议相关的判断（JSON 每语句一行、错误以 {\"error\":...} 返回、不输出就绪标记）是推断，尚未得到官方驱动确认。"
+  ]
+}
