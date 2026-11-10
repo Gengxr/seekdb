@@ -250,15 +250,29 @@ bool handle_directive(const std::string& line, mvd::Executor& exec, bool& quit) 
     }
     return true;
   }
-  if (starts_with(low, "--restart") || starts_with(low, "--ping") || starts_with(low, "--ready") ||
-      starts_with(low, "--noop")) {
+  if (starts_with(low, "--ping") || starts_with(low, "--ready") || starts_with(low, "--noop")) {
     return true;
   }
-  if (starts_with(low, "--quit") || starts_with(low, "--exit")) {
+  // "--restart" asks the database to shut down normally so the driver can start
+  // it again with the same data directory.  Uncommitted work is dropped.
+  if (starts_with(low, "--restart")) {
+    quit = true;
+    return true;
+  }
+  if (starts_with(low, "--quit") || starts_with(low, "--exit") || starts_with(low, "--stop")) {
     quit = true;
     return true;
   }
   return false;
+}
+
+// "\\q", "quit", "exit" style shutdown commands.
+bool is_quit_statement(std::string_view s) {
+  std::string t = trim(s);
+  while (!t.empty() && (t.back() == ';' || t.back() == ' ')) t.pop_back();
+  std::string low = mvd::to_lower(t);
+  return low == "\\q" || low == "\\quit" || low == "quit" || low == "exit" || low == "bye" ||
+         low == "shutdown" || low == "\\c";
 }
 
 }  // namespace
@@ -333,6 +347,10 @@ int main(int argc, char** argv) {
     bool quit = false;
 
     auto run_statement = [&](const std::string& sql) {
+      if (is_quit_statement(sql)) {
+        quit = true;
+        return;
+      }
       mvd::ResultSet rs;
       bool failed = false;
       mvd::ErrCode code = mvd::ErrCode::Internal;

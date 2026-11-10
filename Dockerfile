@@ -15,7 +15,7 @@ WORKDIR /src
 COPY minivectordb/ /src/minivectordb/
 
 RUN cmake -S /src/minivectordb -B /src/build -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /src/build -j"$(nproc)"
+    && cmake --build /src/build -j4
 
 FROM ubuntu:24.04
 
