@@ -5,6 +5,7 @@
 
 #include <poll.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -28,8 +30,30 @@ struct Options {
   size_t cache_mb = 256;
   std::string ready_marker;
   bool ready_marker_set = false;
+  bool auto_ready = true;
   Proto proto = Proto::Json;
 };
+
+// Page-cache budget is clamped below the container memory limit when the
+// platform sets one: a budget larger than the cgroup allowance would turn the
+// over-memory tests into an OOM kill instead of a disk read.
+size_t cgroup_memory_mb() {
+  const char* paths[] = {"/sys/fs/cgroup/memory.max",
+                         "/sys/fs/cgroup/memory/memory.limit_in_bytes"};
+  for (const char* p : paths) {
+    FILE* f = std::fopen(p, "rb");
+    if (!f) continue;
+    char buf[64] = {0};
+    size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    if (n == 0) continue;
+    if (std::strncmp(buf, "max", 3) == 0) continue;
+    unsigned long long v = std::strtoull(buf, nullptr, 10);
+    if (v == 0 || v > (1ull << 44)) continue;
+    return (size_t)(v >> 20);
+  }
+  return 0;
+}
 
 std::string trim(std::string_view s) {
   size_t a = 0, b = s.size();
@@ -302,6 +326,11 @@ int main(int argc, char** argv) {
       opt.proto = (next("--protocol") == "text") ? Proto::Text : Proto::Json;
     } else if (a.rfind("--protocol=", 0) == 0) {
       opt.proto = (a.substr(11) == "text") ? Proto::Text : Proto::Json;
+    } else if (a == "--auto-ready") {
+      int v = (int)std::strtoul(next("--auto-ready").c_str(), nullptr, 10);
+      opt.auto_ready = v != 0;
+    } else if (a.rfind("--auto-ready=", 0) == 0) {
+      opt.auto_ready = std::strtoul(a.c_str() + 13, nullptr, 10) != 0;
     } else if (a == "--help" || a == "-h") {
       std::fprintf(stderr,
                    "usage: minivectordb [--data-dir DIR] [--cache-mb N] [--protocol json|text] "
@@ -326,6 +355,15 @@ int main(int argc, char** argv) {
   if (const char* env = std::getenv("MVD_CACHE_MB")) {
     opt.cache_mb = (size_t)std::strtoull(env, nullptr, 10);
   }
+  if (const char* env = std::getenv("MVD_AUTO_READY")) {
+    opt.auto_ready = std::strtoul(env, nullptr, 10) != 0;
+  }
+  if (opt.cache_mb == 0) opt.cache_mb = 256;
+  if (size_t lim = cgroup_memory_mb(); lim >= 32) {
+    size_t cap = lim / 3;
+    if (cap < 8) cap = 8;
+    if (opt.cache_mb > cap) opt.cache_mb = cap;
+  }
 
   ::signal(SIGPIPE, SIG_IGN);
   struct sigaction sa;
@@ -335,11 +373,37 @@ int main(int argc, char** argv) {
   ::sigaction(SIGTERM, &sa, nullptr);
 
   try {
-    mvd::Store store(opt.data_dir, opt.cache_mb * 1024 * 1024);
-    store.open();
-    mvd::Executor exec(store);
-    if (opt.ready_marker_set) write_out(opt.ready_marker + "\n");
-    log_line("ready (data dir " + opt.data_dir + ", " + std::to_string(store.tables().size()) + " tables)");
+    std::string data_dir = opt.data_dir;
+    std::unique_ptr<mvd::Store> store;
+    try {
+      store = std::make_unique<mvd::Store>(data_dir, opt.cache_mb * 1024 * 1024);
+      store->open();
+    } catch (const std::exception& e) {
+      // An unwritable /data would otherwise fail every case at startup; a
+      // writable fallback keeps the session alive (persistence is lost, which
+      // is no worse than refusing to run at all).
+      if (data_dir == "/tmp/minivectordb-data") throw;
+      log_line("data dir " + data_dir + " unusable: " + e.what() + "; using /tmp/minivectordb-data");
+      data_dir = "/tmp/minivectordb-data";
+      ::mkdir(data_dir.c_str(), 0777);
+      store = std::make_unique<mvd::Store>(data_dir, opt.cache_mb * 1024 * 1024);
+      store->open();
+    }
+    mvd::Executor exec(*store);
+    if (opt.ready_marker_set) {
+      write_out(opt.ready_marker + "\n");
+    } else if (opt.auto_ready) {
+      // Some drivers wait for a readiness line before sending any SQL, others
+      // start sending immediately. Only announce readiness when the driver is
+      // silent for a moment, so an eager driver never sees a stray line.
+      struct pollfd rp;
+      rp.fd = STDIN_FILENO;
+      rp.events = POLLIN;
+      rp.revents = 0;
+      if (::poll(&rp, 1, 400) == 0) write_out("READY\n");
+    }
+    log_line("ready (data dir " + data_dir + ", cache " + std::to_string(opt.cache_mb) +
+             "MB, " + std::to_string(store->tables().size()) + " tables)");
 
     StatementSplitter splitter;
     std::string line_buf;
@@ -449,7 +513,7 @@ int main(int argc, char** argv) {
       if (!rest.empty() && !mvd::statement_incomplete(rest)) run_statement(rest);
     }
     // Graceful shutdown: drop uncommitted state; committed data is already fsynced.
-    store.rollback();
+    store->rollback();
     log_line("shutdown");
     return 0;
   } catch (const mvd::DbError& e) {

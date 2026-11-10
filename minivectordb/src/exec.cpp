@@ -291,6 +291,44 @@ std::vector<Executor::RowRef> Executor::collect_matching(Table& t, const std::ve
 
 // ---------------------------------------------------------------- SELECT
 ResultSet Executor::exec_select(Stmt& stmt) {
+  // Constant projection (SELECT 1) used by drivers as a health probe.
+  if (stmt.table.empty()) {
+    ResultSet rs;
+    rs.query = true;
+    std::vector<Cell> row;
+    for (const SelectItem& it : stmt.items) {
+      if (!it.is_literal) fail(ErrCode::SyntaxError, "expected FROM");
+      std::string name = it.alias;
+      if (name.empty()) {
+        switch (it.lit.kind) {
+          case RawValue::Kind::Int:
+            name = std::to_string(it.lit.i);
+            break;
+          case RawValue::Kind::Str:
+            name = it.lit.s;
+            break;
+          default:
+            name = "value";
+            break;
+        }
+      }
+      rs.columns.push_back(name);
+      switch (it.lit.kind) {
+        case RawValue::Kind::Int:
+          row.push_back(Cell::big(it.lit.i));
+          break;
+        case RawValue::Kind::Str:
+          row.push_back(Cell::str(it.lit.s));
+          break;
+        default:
+          row.push_back(Cell::str(format_vector(it.lit.v.data(), (int)it.lit.v.size())));
+          break;
+      }
+    }
+    if (!row.empty()) rs.rows.push_back(std::move(row));
+    return rs;
+  }
+
   Table& t = store_.require_table(stmt.table);
   const Schema& schema = t.schema;
 

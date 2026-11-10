@@ -318,6 +318,9 @@ class Parser {
     } else if (kw == "quit" || kw == "exit") {
       ++i_;
       s.kind = Stmt::Kind::Quit;
+    } else if (kw == "ping" || kw == "noop") {
+      ++i_;
+      s.kind = Stmt::Kind::Noop;
     } else {
       fail(ErrCode::UnsupportedSql, "unsupported statement: " + cur().text);
     }
@@ -637,6 +640,12 @@ class Parser {
       SelectItem it;
       if (accept_punct('*')) {
         it.star = true;
+      } else if (cur().kind == Token::Int || cur().kind == Token::Float || cur().kind == Token::Str ||
+                 is_punct('[')) {
+        // Constant projection such as SELECT 1 (used by drivers as a health probe).
+        it.is_literal = true;
+        it.lit = parse_raw_value();
+        parse_optional_alias(it);
       } else if (cur().kind == Token::Ident) {
         std::string fn = to_lower(cur().text);
         if (fn == "l2_distance") {
@@ -669,6 +678,14 @@ class Parser {
       s.items.push_back(std::move(it));
       if (accept_punct(',')) continue;
       break;
+    }
+    // Constant projection: SELECT 1 [, 2 ...] with no FROM clause.
+    if (!is_kw("from")) {
+      for (const SelectItem& it : s.items) {
+        if (!it.is_literal) fail(ErrCode::SyntaxError, "expected FROM");
+      }
+      if (cur().kind != Token::End) fail(ErrCode::UnsupportedSql, "unsupported trailing clause");
+      return s;
     }
     expect_kw("from");
     s.table = expect_ident();

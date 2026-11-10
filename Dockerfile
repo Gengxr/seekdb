@@ -19,10 +19,9 @@ RUN cmake -S /src/minivectordb -B /src/build -DCMAKE_BUILD_TYPE=Release \
 
 FROM ubuntu:24.04
 
-RUN mkdir -p /data
+RUN mkdir -p /data && chmod 0777 /data
 COPY --from=build /src/build/minivectordb /usr/local/bin/minivectordb
 
-VOLUME ["/data"]
 WORKDIR /app
 
 # The evaluator keeps stdin open and streams SQL statements; results go to stdout

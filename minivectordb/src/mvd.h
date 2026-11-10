@@ -136,8 +136,10 @@ enum class SortDir : uint8_t { Asc, Desc };
 struct SelectItem {
   bool star = false;
   bool is_distance = false;
+  bool is_literal = false;   // constant projection, e.g. SELECT 1
   std::string col_name;      // plain column or the vector column of L2_DISTANCE
   std::vector<float> query;  // L2_DISTANCE query vector
+  RawValue lit;              // literal for SELECT <literal>
   std::string alias;
 };
 
