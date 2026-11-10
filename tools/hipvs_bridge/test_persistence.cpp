@@ -16,6 +16,9 @@ int main(int argc, char **argv)
     }
   }
   void *index = nullptr;
+  if (seekdb_cuvs_build(nullptr, count, dimension) != nullptr ||
+      seekdb_cuvs_build(vectors.data(), count, 0) != nullptr ||
+      seekdb_cuvs_build(vectors.data(), -1, dimension) != nullptr) return 15;
   if (std::strcmp(argv[1], "write") == 0) {
     index = seekdb_cuvs_build(vectors.data(), count, dimension);
     if (!index || seekdb_cuvs_serialize(index, argv[2]) != 0) return 3;

@@ -26,6 +26,8 @@ typedef struct {
 
 void* seekdb_cuvs_build(const float* base, long n, long dim)
 {
+  if (!base || n <= 0 || dim <= 0 ||
+      (size_t)n > SIZE_MAX / sizeof(float) / (size_t)dim) return NULL;
   sk_cuvs_index* h = (sk_cuvs_index*)calloc(1, sizeof(*h));
   if (!h) return NULL;
   if (pthread_mutex_init(&h->search_mutex, NULL) != 0) { free(h); return NULL; }
@@ -33,7 +35,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
     pthread_mutex_destroy(&h->search_mutex); free(h); return NULL;
   }
 
-  DLManagedTensor dset; long ds[2] = {n, dim};
+  DLManagedTensor dset = {0}; long ds[2] = {n, dim};
   dset.dl_tensor.data = (void*)base;
   dset.dl_tensor.device.device_type = kDLCPU; dset.dl_tensor.device.device_id = 0;
   dset.dl_tensor.ndim = 2;
@@ -47,6 +49,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->nn_descent_niter = 100;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
+  if (cuvsStreamSync(h->res) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
   return h;
 
@@ -61,7 +64,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
                        unsigned int* out_ids, float* out_dist)
 {
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
-  if (!h || !query || !out_ids || nq <= 0 || topk <= 0 || topk > h->n ||
+  if (!h || !query || !out_ids || h->dim <= 0 || nq <= 0 || topk <= 0 || topk > h->n ||
       (size_t)nq > SIZE_MAX / sizeof(float) / (size_t)h->dim ||
       (size_t)nq > SIZE_MAX / sizeof(unsigned) / (size_t)topk) return 1;
   pthread_mutex_lock(&h->search_mutex);
@@ -97,9 +100,13 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     if (cuvsRMMAlloc(h->res, (void**)&nd, rbytes) != CUVS_SUCCESS) { rc=11; goto done; }
     if (cuvsRMMAlloc(h->res, (void**)&dd, rbytes) != CUVS_SUCCESS) { rc=12; goto done; }
   }
-  if (cudaMemcpy(qd, query, sizeof(float)*nq*h->dim, cudaMemcpyDefault) != cudaSuccess) { rc=13; goto done; }
+  // RMM allocation and CAGRA work use the resources stream, whereas the
+  // blocking copies below use the runtime default stream. Do not rely on
+  // implicit synchronization between these streams or between worker threads.
+  if (cuvsStreamSync(h->res) != CUVS_SUCCESS) { rc=18; goto done; }
+  if (cudaMemcpy(qd, query, qbytes, cudaMemcpyDefault) != cudaSuccess) { rc=13; goto done; }
   {
-    DLManagedTensor qt, nt, dt; long qs[2]={nq,h->dim}, nsh[2]={nq,topk}, dsh[2]={nq,topk};
+    DLManagedTensor qt = {0}, nt = {0}, dt = {0}; long qs[2]={nq,h->dim}, nsh[2]={nq,topk}, dsh[2]={nq,topk};
     qt.dl_tensor.data=qd; qt.dl_tensor.device.device_type=kDLCUDA; qt.dl_tensor.device.device_id=0;
     qt.dl_tensor.ndim=2; qt.dl_tensor.dtype.code=kDLFloat; qt.dl_tensor.dtype.bits=32; qt.dl_tensor.dtype.lanes=1;
     qt.dl_tensor.shape=qs; qt.dl_tensor.strides=0; qt.dl_tensor.byte_offset=0;
@@ -114,10 +121,14 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
+    if (cuvsStreamSync(h->res) != CUVS_SUCCESS) { rc=19; goto done; }
     if (cudaMemcpy(out_ids, nd, sizeof(unsigned)*nq*topk, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
     if (out_dist && cudaMemcpy(out_dist, dd, rbytes, cudaMemcpyDefault) != cudaSuccess) { rc=17; goto done; }
   }
 done:
+  // A failed search may have submitted work before returning its error.
+  // Drain it before releasing temporary buffers or allowing their next use.
+  if (rc != 0) cuvsStreamSync(h->res);
   if (sp) cuvsCagraSearchParamsDestroy(sp);
   if (nq != 1 && dd) cuvsRMMFree(h->res, dd, rbytes);
   if (nq != 1 && nd) cuvsRMMFree(h->res, nd, rbytes);
@@ -131,6 +142,7 @@ void seekdb_cuvs_free(void* handle)
 {
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
   if (!h) return;
+  cuvsStreamSync(h->res);
   if (h->query_buffer) cuvsRMMFree(h->res, h->query_buffer, h->query_bytes);
   if (h->neighbor_buffer) cuvsRMMFree(h->res, h->neighbor_buffer, h->result_bytes);
   if (h->distance_buffer) cuvsRMMFree(h->res, h->distance_buffer, h->result_bytes);
@@ -162,6 +174,7 @@ void* seekdb_cuvs_deserialize(const char* filename, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&index->ip) != CUVS_SUCCESS) goto fail_res;
   if (cuvsCagraIndexCreate(&index->idx) != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraDeserialize(index->res, filename, index->idx) != CUVS_SUCCESS) goto fail_idx;
+  if (cuvsStreamSync(index->res) != CUVS_SUCCESS) goto fail_idx;
   {
     int64_t actual_n = 0;
     int64_t actual_dim = 0;
