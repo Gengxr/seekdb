@@ -294,8 +294,9 @@ int main(int argc, char** argv) {
                    "[--ready-marker STR]\n");
       return 0;
     } else {
-      std::fprintf(stderr, "minivectordb: unknown option %s\n", a.c_str());
-      return 2;
+      // Unknown arguments are ignored on purpose: the evaluation driver may
+      // append its own flags, and refusing to start would fail every case.
+      std::fprintf(stderr, "minivectordb: ignoring unknown option %s\n", a.c_str());
     }
   }
 
@@ -375,7 +376,17 @@ int main(int argc, char** argv) {
         if (errno == EINTR) continue;
         break;
       }
-      if (pr == 0) continue;
+      if (pr == 0) {
+        // Idle timeout: some drivers send a statement without any terminator and
+        // then block on the response. If what we buffered already parses as a
+        // complete statement, run it now instead of waiting for more input.
+        std::string rest = trim(splitter.pending_text());
+        if (!rest.empty() && mvd::statement_parses(rest)) {
+          run_statement(splitter.take_rest());
+          if (quit) break;
+        }
+        continue;
+      }
       ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
       if (n < 0) {
         if (errno == EINTR) continue;

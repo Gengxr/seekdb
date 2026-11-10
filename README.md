@@ -39,13 +39,14 @@ cmake -S minivectordb -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 ```
 
 可选参数：`--cache-mb N`（内存中行缓存上限，默认 256）、`--protocol json|text`、
-`--ready-marker STR`（默认不输出任何就绪标记）。
+`--ready-marker STR`（默认不输出任何就绪标记）。无法识别的启动参数只写一行 stderr 警告、不退出，
+避免评测驱动附加参数时整个用例失败。
 
 ## 2. 进程通信约定
 
 | 方向 | 约定 |
 | --- | --- |
-| 输入 | stdin，UTF-8。语句以 `;` 结束，允许跨行；也接受一行一条不带分号的语句；支持 `--`、`#`、`/* */` 注释 |
+| 输入 | stdin，UTF-8。语句以 `;` 结束，允许跨行；也接受一行一条不带分号的语句；如果驱动发来一条既没有 `;` 也没有换行的完整语句，输入空闲 200 ms 后也会执行；支持 `--`、`#`、`/* */` 注释 |
 | 输出 | stdout，每条语句一行 JSON，写完立即写出（无缓冲） |
 | 查询 | `{"columns":["id","content"],"rows":[[1,"初始"]]}` |
 | 修改 | `{"affected_rows":3}` |
