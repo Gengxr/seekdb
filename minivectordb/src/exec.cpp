@@ -151,20 +151,6 @@ struct CandHeapCmp {
   bool operator()(const Cand& a, const Cand& b) const { return cand_less(a, b); }
 };
 
-std::string format_vector(const float* v, int n) {
-  std::string out;
-  out.reserve((size_t)n * 8 + 2);
-  out.push_back('[');
-  for (int i = 0; i < n; ++i) {
-    if (i) out.push_back(',');
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%g", (double)v[i]);
-    out += buf;
-  }
-  out.push_back(']');
-  return out;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------- helpers
@@ -321,7 +307,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
           row.push_back(Cell::str(it.lit.s));
           break;
         default:
-          row.push_back(Cell::str(format_vector(it.lit.v.data(), (int)it.lit.v.size())));
+          row.push_back(Cell::vec(it.lit.v));
           break;
       }
     }
@@ -370,7 +356,36 @@ ResultSet Executor::exec_select(Stmt& stmt) {
 
   int order_item = -1;
   int32_t order_col = -1;
-  if (stmt.order_position > 0) {
+  if (stmt.order_is_distance) {
+    // ORDER BY L2_DISTANCE(...) need not be projected: add it as a hidden key item.
+    int32_t ci = schema.find(stmt.order_dist_col);
+    if (ci < 0) fail(ErrCode::ColumnNotFound, "column not found: " + stmt.order_dist_col);
+    if (schema.cols[ci].type != ColType::Vector) {
+      fail(ErrCode::InvalidValue, "L2_DISTANCE requires a VECTOR column");
+    }
+    if ((int32_t)stmt.order_dist_query.size() != schema.cols[ci].len) {
+      fail(ErrCode::DimensionMismatch, "query vector dimension mismatch");
+    }
+    int found = -1;
+    for (size_t i = 0; i < items.size(); ++i) {
+      if (items[i].dist && !items[i].hidden && items[i].col == ci &&
+          items[i].query == stmt.order_dist_query) {
+        found = (int)i;
+        break;
+      }
+    }
+    if (found < 0) {
+      ItemPlan p;
+      p.dist = true;
+      p.hidden = true;
+      p.col = ci;
+      p.query = stmt.order_dist_query;
+      p.name = "distance";
+      items.push_back(std::move(p));
+      found = (int)items.size() - 1;
+    }
+    order_item = found;
+  } else if (stmt.order_position > 0) {
     if ((size_t)stmt.order_position > items.size()) {
       fail(ErrCode::ColumnNotFound, "ORDER BY ordinal out of range");
     }
@@ -399,7 +414,9 @@ ResultSet Executor::exec_select(Stmt& stmt) {
 
   ResultSet rs;
   rs.query = true;
-  for (const ItemPlan& it : items) rs.columns.push_back(it.name);
+  for (const ItemPlan& it : items) {
+    if (!it.hidden) rs.columns.push_back(it.name);
+  }
 
   // ------------------------- fast path: vector TopK in one pass
   if (use_heap && t.cached && store_.overlay_for(t)->rows.empty()) {
@@ -463,6 +480,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
       std::vector<Cell> out;
       out.reserve(items.size());
       for (const ItemPlan& it : items) {
+        if (it.hidden) continue;
         if (it.dist) {
           out.push_back(Cell::dbl(std::sqrt(l2_sq_double((const float*)(row + s.vec_rel), it.query.data(),
                                                           (int)it.query.size()))));
@@ -477,7 +495,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
             out.push_back(Cell::str(std::move(v.s)));
             break;
           case ColType::Vector:
-            out.push_back(Cell::str(format_vector(v.v.data(), (int)v.v.size())));
+            out.push_back(Cell::vec(std::move(v.v)));
             break;
         }
       }
@@ -618,6 +636,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
     std::vector<Cell> out;
     out.reserve(items.size());
     for (const ItemPlan& it : items) {
+      if (it.hidden) continue;
       if (it.dist) {
         double d = std::sqrt(l2_sq_double((const float*)(data + vec_rel), it.query.data(), (int)it.query.size()));
         out.push_back(Cell::dbl(d));
@@ -632,7 +651,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
           out.push_back(Cell::str(std::move(v.s)));
           break;
         case ColType::Vector:
-          out.push_back(Cell::str(format_vector(v.v.data(), (int)v.v.size())));
+          out.push_back(Cell::vec(std::move(v.v)));
           break;
       }
     }

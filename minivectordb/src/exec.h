@@ -7,10 +7,18 @@
 namespace mvd {
 
 struct Cell {
-  enum class Kind { Int, Str, Dbl } kind = Kind::Int;
+  enum class Kind { Int, Str, Dbl, Vec } kind = Kind::Int;
   int64_t i = 0;
   double d = 0;
   std::string s;
+  std::vector<float> v;
+
+  static Cell vec(std::vector<float> x) {
+    Cell c;
+    c.kind = Kind::Vec;
+    c.v = std::move(x);
+    return c;
+  }
 
   static Cell big(int64_t v) {
     Cell c;
@@ -53,6 +61,7 @@ class Executor {
 
   struct ItemPlan {
     bool dist = false;
+    bool hidden = false;  // ORDER BY key only: computed, not projected
     int32_t col = -1;
     std::vector<float> query;
     std::string name;

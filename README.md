@@ -2,8 +2,9 @@
 
 2026 年 OceanBase 数据库大赛加赛 · 赛题一「完成一个轻量向量数据库」的实现。
 
-单机、单进程、单客户端连接，通过标准输入接收 SQL，标准输出返回结果，持久化数据全部写在
-`--data-dir`（默认 `/data`）。从零实现存储、SQL 解析与执行、向量检索、事务和崩溃恢复；
+单机、单进程、单客户端连接，通过标准输入接收一行一条 JSON 请求，标准输出返回一行一条 JSON 响应
+（官方 `STDIO_PROTOCOL.md` 的 JSON Lines 约定），持久化数据全部写在 `--data-dir`（默认 `/data`）。
+从零实现存储、SQL 解析与执行、向量检索、事务和崩溃恢复；
 没有使用 SQLite、RocksDB、Faiss、VSAG、HNSWlib 等现成引擎或索引库，第三方依赖只有 libc 和 libstdc++。
 
 ## 1. 语言、构建与启动
@@ -38,25 +39,27 @@ cmake -S minivectordb -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 ./build/minivectordb --data-dir /tmp/mvd
 ```
 
-可选参数：`--cache-mb N`（内存中行缓存上限，默认 256）、`--protocol json|text`、
-`--ready-marker STR`（默认不输出任何就绪标记）。无法识别的启动参数只写一行 stderr 警告、不退出，
+可选参数：`--cache-mb N`（内存中行缓存上限，默认 256）。数据目录和缓存预算也可以分别用环境变量
+`VECTORDB_DATA_DIR`、`MVD_CACHE_MB` 给出。无法识别的启动参数只写一行 stderr 警告、不退出，
 避免评测驱动附加参数时整个用例失败。
 
-## 2. 进程通信约定
+## 2. 进程通信约定（JSON Lines）
+
+按官方 `STDIO_PROTOCOL.md`（`2026-competition-round2` 分支）实现：
 
 | 方向 | 约定 |
 | --- | --- |
-| 输入 | stdin，UTF-8。语句以 `;` 结束，允许跨行；也接受一行一条不带分号的语句；如果驱动发来一条既没有 `;` 也没有换行的完整语句，输入空闲 200 ms 后也会执行；支持 `--`、`#`、`/* */` 注释 |
-| 输出 | stdout，每条语句一行 JSON，写完立即写出（无缓冲） |
-| 查询 | `{"columns":["id","content"],"rows":[[1,"初始"]]}` |
-| 修改 | `{"affected_rows":3}` |
-| DDL / 事务 / SET | `{}` |
-| 错误 | `{"error":"duplicate_key"}`，语句继续执行 |
-| 日志 | 全部写 stderr，不混入 stdout |
-| 退出 | stdin 关闭、`QUIT`/`EXIT`、SIGTERM/SIGINT 都能正常退出 |
+| 输入 | stdin，一行一条 UTF-8 JSON 请求：`{"id":1,"op":"execute","sql":"SELECT ...","search_mode":"exact"}` |
+| 输出 | stdout，一行一条 JSON 响应，写完立即 flush；stdout 只放协议报文，诊断日志全部走 stderr |
+| 启动 | 完成恢复、开始读请求之前输出 `{"type":"ready"}`，每次启动（含重启）都输出一次 |
+| 查询 | `{"id":1,"ok":true,"columns":["id"],"rows":[[1],[2]]}`；BIGINT 是 JSON 整数，VECTOR 是 JSON 数组，空结果也返回列名 |
+| 修改 | `{"id":2,"ok":true,"affected_rows":1}` |
+| 其他语句 | `{"id":3,"ok":true}`，`ok` 必须是 JSON 布尔值 |
+| 错误 | `{"id":4,"ok":false,"error":{"code":"duplicate_key","message":"..."}}`，出错后会话继续 |
+| 关闭 | `{"id":5,"op":"shutdown"}`：回滚未提交事务，回 `{"id":5,"ok":true}`，退出码 0，之后不再输出任何字节 |
 
-驱动指令 `--mode ann` / `--mode exact` 也接受（等价于 `SET vector_mode = ann|exact`）；
-`--restart` 由测试驱动自己处理，程序看到时按幂等忽略。
+请求里的 `id` 原样回传（数字仍是数字、字符串仍是字符串）；`search_mode` 为 `ann` 时按 `SET
+vector_mode = ann` 处理，`exact` 时按精确模式处理。`sql` 里的语句可以带结尾分号，程序不做分号切分。
 
 ## 3. SQL 支持范围
 
@@ -95,25 +98,18 @@ SET vector_mode = ann;   -- 或 exact，默认 exact
 
 ## 4. 从空目录开始的完整示例
 
-```bash
-$ rm -rf /tmp/d && ./minivectordb --data-dir /tmp/d
-CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), content VARCHAR(16), embedding VECTOR(2));
-{}
-INSERT INTO docs VALUES (3,'乙','三','[0,2]'),(1,'甲','一','[0,0]'),(2,'甲','二','[1,0]');
-{"affected_rows":3}
-SELECT id, content FROM docs ORDER BY id;
-{"columns":["id","content"],"rows":[[1,"一"],[2,"二"],[3,"三"]]}
-BEGIN;
-{}
-UPDATE docs SET embedding = '[3,4]' WHERE id = 1;
-{"affected_rows":1}
-DELETE FROM docs WHERE id = 2;
-{"affected_rows":1}
-ROLLBACK;
-{}
-SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs ORDER BY distance LIMIT 10;
-{"columns":["id","distance"],"rows":[[1,0.000000],[2,1.000000],[3,2.000000]]}
-```
+启动后先输出 `{"type":"ready"}`，之后每条请求一行：
+
+| # | 请求里的 `sql` | 响应 |
+| --- | --- | --- |
+| 1 | `CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), content VARCHAR(16), embedding VECTOR(2));` | `{"id":1,"ok":true}` |
+| 2 | `INSERT INTO docs VALUES (3,'乙','三','[0,2]'),(1,'甲','一','[0,0]'),(2,'甲','二','[1,0]');` | `{"id":2,"ok":true,"affected_rows":3}` |
+| 3 | `SELECT id, content FROM docs ORDER BY id;` | `{"id":3,"ok":true,"columns":["id","content"],"rows":[[1,"一"],[2,"二"],[3,"三"]]}` |
+| 4 | `BEGIN;` | `{"id":4,"ok":true}` |
+| 5 | `UPDATE docs SET embedding = '[3,4]' WHERE id = 1;` | `{"id":5,"ok":true,"affected_rows":1}` |
+| 6 | `DELETE FROM docs WHERE id = 2;` | `{"id":6,"ok":true,"affected_rows":1}` |
+| 7 | `ROLLBACK;` | `{"id":7,"ok":true}` |
+| 8 | `SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs ORDER BY distance LIMIT 10;` | `{"id":8,"ok":true,"columns":["id","distance"],"rows":[[1,0],[2,1],[3,2]]}` |
 
 回滚之后记录内容和向量检索都回到事务前状态：事务里被改掉的 `id=1` 向量、被删掉的 `id=2` 记录都恢复。
 重启（重新执行最后一条 SELECT）得到同样的输出，说明正常关闭时的落盘和启动时的恢复一致。
@@ -164,7 +160,7 @@ TopK 查询约 0.31 秒，瓶颈已经是内存带宽。
 
 启动时按顺序扫描 `mvd.log`：magic 不符、长度越界或 CRC 不符即认为尾部是崩溃留下的半个记录，把文件
 截断到最后一条完整记录，再重建 `pk → slot` 索引。重放过程不修改日志内容，所以在恢复途中再次被强杀，
-下次启动照样从头重放，结果一致。索引重建完成前不输出任何就绪标记。
+下次启动照样从头重放，结果一致。恢复完成后才输出 `{"type":"ready"}`，所以驱动看到 ready 时数据已经可用。
 
 日志膨胀到 `live × 4 + 8 MB` 以上且超过 64 MB 时会把存活行重写到新日志（临时文件 + `fdatasync` +
 `rename`），保证恢复时间和磁盘占用有界。
@@ -184,13 +180,16 @@ TopK 查询约 0.31 秒，瓶颈已经是内存带宽。
 
 ## 7. 本地验证记录
 
-`minivectordb/tests/` 下是三个本地测试脚本，运行记录如下（服务器 24 核 / 60 GB，数据目录在 /data）：
+官方仓库自带的判题器 `protocol_check` 两种模式都跑过（服务器 24 核 / 60 GB，数据目录在 /data）：
 
 | 测试 | 内容 | 结果 |
 | --- | --- | --- |
-| `run_public_cases.py` | 题包 20 个公开用例、95 条 SQL | 20/20 通过 |
-| `crash_test.py` | SIGKILL 后已提交数据保留、未提交事务不生效、多行插入原子性、恢复途中再次强杀 | 通过 |
-| `large_data.py` | 120,000 行 × 128 维，缓存预算 8 MB（数据 65.6 MB） | 写入 5.54 s，重启后向量 Top5 8.9 ms，峰值 RSS 79 MB |
+| `protocol_check --command` | 直接跑本地二进制，20 个公开用例 | 20/20 通过，4~10 ms/用例 |
+| `protocol_check --image` | 用评测参数跑镜像（`--read-only`、无网络、2 CPU、2 GiB、128 PID、cap-drop） | 20/20 通过，138~292 ms/用例 |
+| `tests/json_probe.py` | 握手、`ann`/`exact` 切换、`ORDER BY L2_DISTANCE(...)`、`SELECT *`、非法向量、空结果、重启持久化 | 全部符合协议 |
+
+存储层的语义测试（SIGKILL 恢复、120,000 行 × 128 维超缓存数据、随机对照 8 组 seed）在协议改造前用
+文本协议跑过，存储与执行部分未改动；协议层改造后用 `json_probe.py` 复验了重启持久化与事务关闭语义。
 
 性能自测（10,000 行 × 128 维，100 条一批写入并提交，1000 次 TopK K=10，一半带等值过滤）：
 
@@ -201,5 +200,5 @@ TopK 查询约 0.31 秒，瓶颈已经是内存带宽。
 | 峰值内存 | 21 MB |
 | 数据目录大小 | 5.6 MB |
 
-公开用例的 .test/.result 文件来自官方 `2026-competition-round2` 分支的 `mysqltest/`；本地驱动按题面
-约定逐条发送 SQL 并按 `1e-5` 容差比较 JSON 断言。测试脚本只用于自测，不参与正式计分。
+公开用例的 .test/.result 文件来自官方 `2026-competition-round2` 分支的 `mysqltest/`；判题协议以同分支
+`STDIO_PROTOCOL.md` 和 `protocol_check/` 为准。测试脚本只用于自测，不参与正式计分。

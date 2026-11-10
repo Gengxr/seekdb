@@ -38,17 +38,31 @@ class Db:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        line = self.proc.stdout.readline()
+        if not line or json.loads(line) != {"type": "ready"}:
+            raise RuntimeError("missing ready line: %r" % (line,))
+        self.next_id = 1
 
     def send(self, sql: str) -> dict:
-        self.proc.stdin.write((sql + "\n").encode())
+        rid = self.next_id
+        self.next_id += 1
+        req = {"id": rid, "op": "execute", "sql": sql, "search_mode": "exact"}
+        self.proc.stdin.write((json.dumps(req) + "\n").encode())
         self.proc.stdin.flush()
         line = self.proc.stdout.readline()
         if not line:
             raise RuntimeError("no response")
-        return json.loads(line)
+        resp = json.loads(line)
+        if resp.get("id") != rid:
+            raise RuntimeError("response id mismatch: %r" % (resp,))
+        return resp
 
     def stop(self) -> None:
-        self.proc.stdin.close()
+        rid = self.next_id
+        self.next_id += 1
+        self.proc.stdin.write((json.dumps({"id": rid, "op": "shutdown"}) + "\n").encode())
+        self.proc.stdin.flush()
+        self.proc.stdout.readline()
         self.proc.wait(timeout=120)
 
 

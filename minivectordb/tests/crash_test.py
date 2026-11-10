@@ -36,24 +36,40 @@ class Db:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        line = self.proc.stdout.readline()
+        if not line or json.loads(line) != {"type": "ready"}:
+            raise RuntimeError("missing ready line: %r" % (line,))
+        self.next_id = 1
 
     def send(self, sql: str, timeout: float = 30.0) -> dict:
         assert self.proc and self.proc.stdin and self.proc.stdout
-        self.proc.stdin.write((sql + "\n").encode())
+        rid = self.next_id
+        self.next_id += 1
+        req = {"id": rid, "op": "execute", "sql": sql, "search_mode": "exact"}
+        self.proc.stdin.write((json.dumps(req) + "\n").encode())
         self.proc.stdin.flush()
         line = self.proc.stdout.readline()
         if not line:
             raise RuntimeError("no response")
-        return json.loads(line)
+        resp = json.loads(line)
+        if resp.get("id") != rid:
+            raise RuntimeError("response id mismatch: %r" % (resp,))
+        return resp
 
     def query(self, sql: str):
         r = self.send(sql)
+        if not r.get("ok"):
+            raise RuntimeError("query failed: %r" % (r,))
         return r.get("rows", [])
 
     def stop(self) -> None:
         if not self.proc:
             return
-        self.proc.stdin.close()
+        rid = self.next_id
+        self.next_id += 1
+        self.proc.stdin.write((json.dumps({"id": rid, "op": "shutdown"}) + "\n").encode())
+        self.proc.stdin.flush()
+        self.proc.stdout.readline()
         self.proc.wait(timeout=60)
         self.proc = None
 

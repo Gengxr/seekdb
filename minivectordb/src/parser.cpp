@@ -703,6 +703,22 @@ class Parser {
       if (cur().kind == Token::Int) {
         s.order_position = (int32_t)cur().ival;
         advance();
+      } else if (cur().kind == Token::Ident && to_lower(cur().text) == "l2_distance") {
+        // ORDER BY L2_DISTANCE(col, '[...]'): the key expression need not be projected.
+        advance();
+        s.order_is_distance = true;
+        expect_punct('(');
+        s.order_dist_col = expect_ident();
+        expect_punct(',');
+        if (cur().kind == Token::Str) {
+          s.order_dist_query = parse_vector_string(cur().text);
+          advance();
+        } else if (is_punct('[')) {
+          s.order_dist_query = parse_vector_brackets();
+        } else {
+          fail(ErrCode::SyntaxError, "expected query vector literal");
+        }
+        expect_punct(')');
       } else {
         s.order_name = expect_ident();
         if (!s.order_name.empty() && accept_punct('.')) s.order_name = expect_ident();

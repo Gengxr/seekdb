@@ -165,6 +165,9 @@ struct Stmt {
   std::vector<Cond> where;
   std::string order_name;  // empty: no ORDER BY
   int32_t order_position = -1;  // 1-based ORDER BY ordinal, -1 when absent
+  bool order_is_distance = false;  // ORDER BY L2_DISTANCE(col, '[...]')
+  std::string order_dist_col;
+  std::vector<float> order_dist_query;
   SortDir order_dir = SortDir::Asc;
   bool has_limit = false;
   int64_t limit = 0;
