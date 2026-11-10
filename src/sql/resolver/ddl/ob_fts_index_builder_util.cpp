@@ -26,6 +26,9 @@
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_utils.h"
 #include "lib/cpu/ob_cpu_topology.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace oceanbase
 {
@@ -1032,6 +1035,47 @@ int ObFtsIndexBuilderUtil::generate_doc_id_column(
   return ret;
 }
 
+
+static int64_t read_cgroup_cpu_quota()
+{
+  int64_t cpus = 0;
+  FILE *fp = fopen("/sys/fs/cgroup/cpu.max", "r");
+  if (NULL != fp) {
+    char quota_str[64] = {0};
+    long long period = 0;
+    if (2 == fscanf(fp, "%63s %lld", quota_str, &period) && period > 0
+        && 0 != strcmp(quota_str, "max")) {
+      long long quota = atoll(quota_str);
+      if (quota > 0) {
+        cpus = static_cast<int64_t>((quota + period - 1) / period);
+      }
+    }
+    fclose(fp);
+  }
+  if (0 == cpus) {
+    fp = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r");
+    if (NULL != fp) {
+      long long quota = 0;
+      if (1 == fscanf(fp, "%lld", &quota) && quota > 0) {
+        long long period = 0;
+        FILE *pf = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
+        if (NULL != pf) {
+          if (1 != fscanf(pf, "%lld", &period)) {
+            period = 0;
+          }
+          fclose(pf);
+        }
+        if (period <= 0) {
+          period = 100000;
+        }
+        cpus = static_cast<int64_t>((quota + period - 1) / period);
+      }
+      fclose(fp);
+    }
+  }
+  return cpus;
+}
+
 int ObFtsIndexBuilderUtil::decide_parallelism(
     const share::schema::ObIndexType index_type,
     const int64_t original_parallelism,
@@ -1048,8 +1092,17 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        // Full-text index builds default to a single worker; use the cores.
-        decided_parallelism = MAX(original_parallelism, MIN(common::get_cpu_count(), 8L));
+        {
+          // Full-text index builds default to a single worker.  Use the cores that
+          // this container is actually allowed to run on: get_cpu_count() reports the
+          // host view, so cap it by the cgroup quota when one is configured.
+          int64_t dop = MIN(static_cast<int64_t>(common::get_cpu_count()), 8L);
+          const int64_t quota = read_cgroup_cpu_quota();
+          if (quota > 0) {
+            dop = MIN(dop, quota);
+          }
+          decided_parallelism = MAX(original_parallelism, MAX(dop, 1L));
+        }
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
