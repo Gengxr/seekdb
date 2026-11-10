@@ -1049,7 +1049,7 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
         // Full-text index builds default to a single worker; use the cores.
-        decided_parallelism = MAX(original_parallelism, MIN(common::get_cpu_count(), 8L));
+        decided_parallelism = MAX(original_parallelism, MIN(common::get_cpu_count(), 16L));
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
