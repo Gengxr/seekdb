@@ -69,6 +69,7 @@ private:
   };
   static const int64_t THREAD_COUNT = 4;
   static const int64_t IDLE_INTERVAL_US = 50L * 1000;
+  static const int64_t MAX_IDLE_INTERVAL_US = 1000L * 1000;
   static const int64_t MAINTENANCE_INTERVAL_US = 10L * 1000 * 1000;
   static const int64_t CLAIM_TIMEOUT_S = 600;
   static const int64_t CANDIDATE_LIMIT = 16;
