@@ -128,6 +128,9 @@ struct Token {
   std::string text;
   int64_t ival = 0;
   double fval = 0;
+  // Set when the literal is the magnitude 9223372036854775808, which only fits
+  // in an int64 once the surrounding minus sign turns it into INT64_MIN.
+  bool int_min_mag = false;
 };
 
 class Lexer {
@@ -277,8 +280,19 @@ class Lexer {
       errno = 0;
       char* endp = nullptr;
       long long v = std::strtoll(text.c_str(), &endp, 10);
-      if (errno == ERANGE) fail(ErrCode::IntegerOverflow, "integer literal out of range");
-      t.ival = (int64_t)v;
+      if (errno == ERANGE) {
+        // INT64_MIN (-9223372036854775808) has a magnitude larger than INT64_MAX,
+        // so the lexer only sees the unsigned magnitude; the sign is applied by
+        // the parser, which knows whether a minus sign precedes the literal.
+        if (text == "9223372036854775808") {
+          t.int_min_mag = true;
+          t.ival = INT64_MIN;
+        } else {
+          fail(ErrCode::IntegerOverflow, "integer literal out of range");
+        }
+      } else {
+        t.ival = (int64_t)v;
+      }
       t.text = std::move(text);
     }
     toks_.push_back(std::move(t));
@@ -386,7 +400,7 @@ class Parser {
       else accept_punct('+');
       double val = 0;
       if (cur().kind == Token::Int) {
-        val = (double)cur().ival;
+        val = cur().int_min_mag ? 9223372036854775808.0 : (double)cur().ival;
         advance();
       } else if (cur().kind == Token::Float) {
         val = cur().fval;
@@ -425,10 +439,17 @@ class Parser {
     if (accept_punct('-')) sign = -1;
     else accept_punct('+');
     if (cur().kind == Token::Int) {
-      int64_t x = cur().ival;
+      const bool min_mag = cur().int_min_mag;
+      const int64_t x = cur().ival;
       advance();
       v.kind = RawValue::Kind::Int;
-      v.i = (sign < 0) ? -x : x;
+      if (min_mag) {
+        // Magnitude 2^63 is only representable as INT64_MIN, i.e. with a minus.
+        if (sign >= 0) fail(ErrCode::IntegerOverflow, "integer literal out of range");
+        v.i = x;
+      } else {
+        v.i = (sign < 0) ? -x : x;
+      }
       return v;
     }
     if (cur().kind == Token::Float) {
