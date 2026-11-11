@@ -56,22 +56,32 @@ public:
       bm25_param_estimator_(),
       mode_flag_(sql::ObMatchAgainstMode::NATURAL_LANGUAGE_MODE),
       function_lookup_mode_(false),
-      union_only_(false) {}
+      union_only_(false),
+      count_only_(false),
+      count_computed_(false),
+      count_only_total_(0),
+      count_only_returned_(0) {}
   virtual ~ObTextDaaTIter() { reset(); }
 
   int init(const ObTextDaaTParam &param);
   virtual void reuse(const bool switch_tablet = false) override;
   virtual void reset() override;
+  virtual int get_next_rows(const int64_t capacity, int64_t &count) override;
 protected:
   virtual int pre_process() override;
   virtual int do_one_merge_round(int64_t &count) override;
   // the union of the posting lists when neither relevance nor a filter is needed
   int do_one_union_round(int64_t &count);
+  int compute_count_only_total();
 protected:
   ObBM25ParamEstimator bm25_param_estimator_;
   sql::ObMatchAgainstMode mode_flag_;
   bool function_lookup_mode_;
   bool union_only_;
+  bool count_only_;
+  bool count_computed_;
+  int64_t count_only_total_;
+  int64_t count_only_returned_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTextDaaTIter);
 };

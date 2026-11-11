@@ -79,6 +79,7 @@ OB_DEF_SERIALIZE(ObDASIRScanCtDef)
   }
   LST_DO_CODE(OB_UNIS_ENCODE,
     flags_,
+    count_only_,
     search_text_,
     inv_scan_domain_id_col_, // FARM COMPAT WHITELIST
     inv_scan_doc_length_col_,
@@ -109,6 +110,7 @@ OB_DEF_DESERIALIZE(ObDASIRScanCtDef)
   }
   LST_DO_CODE(OB_UNIS_DECODE,
     flags_,
+    count_only_,
     search_text_,
     inv_scan_domain_id_col_, // FARM COMPAT WHITELIST 
     inv_scan_doc_length_col_,
@@ -138,6 +140,7 @@ OB_DEF_SERIALIZE_SIZE(ObDASIRScanCtDef)
   len += ObDASAttachCtDef::get_serialize_size();
   LST_DO_CODE(OB_UNIS_ADD_LEN,
     flags_,
+    count_only_,
     search_text_,
     inv_scan_domain_id_col_, // FARM COMPAT WHITELIST
     inv_scan_doc_length_col_,

@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_text_daat_iter.h"
+#include "lib/hash/ob_hashset.h"
 
 namespace oceanbase
 {
@@ -38,6 +39,34 @@ int ObTextDaaTIter::init(const ObTextDaaTParam &param)
     // a count of the matching documents needs only the union of the posting lists
     union_only_ = !param.base_param_->need_project_relevance() && !param.base_param_->need_filter()
                   && !function_lookup_mode_ && param.relevance_collector_->accepts_single_match();
+    count_only_ = param.base_param_->need_count_only();
+    count_computed_ = false;
+    count_only_total_ = 0;
+    count_only_returned_ = 0;
+  }
+  return ret;
+}
+
+int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!count_only_)) {
+    ret = ObSRDaaTIterImpl::get_next_rows(capacity, count);
+  } else if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+  } else if (OB_UNLIKELY(0 == capacity)) {
+    count = 0;
+  } else if (!count_computed_ && OB_FAIL(compute_count_only_total())) {
+  } else {
+    count_computed_ = true;
+    const int64_t batch_size = MIN(capacity, iter_param_->max_batch_size_);
+    const int64_t remaining = count_only_total_ - count_only_returned_;
+    count = MIN(remaining, batch_size);
+    count_only_returned_ += count;
+    output_row_cnt_ += count;
+    if (0 == count) {
+      ret = OB_ITER_END;
+    }
   }
   return ret;
 }
@@ -92,6 +121,10 @@ int ObTextDaaTIter::do_one_union_round(int64_t &count)
 void ObTextDaaTIter::reset()
 {
   union_only_ = false;
+  count_only_ = false;
+  count_computed_ = false;
+  count_only_total_ = 0;
+  count_only_returned_ = 0;
   bm25_param_estimator_.reset();
   // this class can know the type of dim_iters_, but ObSRDaaTIterImpl maybe not
   if (OB_NOT_NULL(dim_iters_)) {
@@ -104,6 +137,9 @@ void ObTextDaaTIter::reset()
 
 void ObTextDaaTIter::reuse(const bool switch_tablet)
 {
+  count_computed_ = false;
+  count_only_total_ = 0;
+  count_only_returned_ = 0;
   if ((OB_NOT_NULL(dim_iters_) && 0 == dim_iters_->count())) {
     // do nothing
   } else {
@@ -200,6 +236,168 @@ int ObTextBMWIter::init_before_wand_process()
   }
   return ret;
 }
+
+
+namespace {
+const int64_t COUNT_ONLY_BITMAP_INIT_BITS = 1LL << 18; // 262144 bits = 32KB
+const int64_t COUNT_ONLY_BITMAP_MAX_BITS = 1LL << 26;  // 8MB
+
+class CountOnlyBitmap
+{
+public:
+  CountOnlyBitmap()
+    : allocator_(nullptr), bits_(nullptr), bits_count_(0), overflow_(), overflow_inited_(false) {}
+  ~CountOnlyBitmap() {}
+  int init(ObIAllocator *allocator)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_ISNULL(allocator)) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      allocator_ = allocator;
+      if (OB_FAIL(ensure_bits(COUNT_ONLY_BITMAP_INIT_BITS))) {
+      }
+    }
+    return ret;
+  }
+  int add(const int64_t id)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_UNLIKELY(id < 0)) {
+      ret = add_overflow(id);
+    } else if (id < bits_count_) {
+      bits_[id >> 6] |= (1ULL << (id & 63));
+    } else {
+      ret = grow_for(id);
+      if (OB_SUCC(ret)) {
+        bits_[id >> 6] |= (1ULL << (id & 63));
+      } else if (OB_SIZE_OVERFLOW == ret) {
+        ret = OB_SUCCESS;
+        if (OB_FAIL(add_overflow(id))) {
+        }
+      }
+    }
+    return ret;
+  }
+  uint64_t *bits() const { return bits_; }
+  int64_t bits_count() const { return bits_count_; }
+  int64_t count() const
+  {
+    int64_t total = 0;
+    for (int64_t i = 0; i < bits_count_ / 64; ++i) {
+      total += __builtin_popcountll(bits_[i]);
+    }
+    if (overflow_inited_) {
+      total += static_cast<int64_t>(overflow_.size());
+    }
+    return total;
+  }
+private:
+  int ensure_bits(const int64_t bits)
+  {
+    int ret = OB_SUCCESS;
+    const int64_t words = (bits + 63) / 64;
+    uint64_t *new_bits = static_cast<uint64_t *>(allocator_->alloc(words * sizeof(uint64_t)));
+    if (OB_ISNULL(new_bits)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMSET(new_bits, 0, words * sizeof(uint64_t));
+      if (OB_NOT_NULL(bits_)) {
+        const int64_t old_words = bits_count_ / 64;
+        MEMCPY(new_bits, bits_, old_words * sizeof(uint64_t));
+      }
+      bits_ = new_bits;
+      bits_count_ = words * 64;
+    }
+    return ret;
+  }
+  int grow_for(const int64_t id)
+  {
+    int ret = OB_SUCCESS;
+    const int64_t need_bits = id + 1;
+    const int64_t new_bits = OB_MAX(bits_count_ * 2, need_bits);
+    if (new_bits > COUNT_ONLY_BITMAP_MAX_BITS) {
+      ret = OB_SIZE_OVERFLOW;
+    } else {
+      ret = ensure_bits(new_bits);
+    }
+    return ret;
+  }
+  int add_overflow(const int64_t id)
+  {
+    int ret = OB_SUCCESS;
+    if (!overflow_inited_) {
+      if (OB_FAIL(overflow_.create(1024))) {
+      } else {
+        overflow_inited_ = true;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ret = overflow_.set_refactored(id);
+      if (OB_HASH_EXIST == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+    return ret;
+  }
+private:
+  ObIAllocator *allocator_;
+  uint64_t *bits_;
+  int64_t bits_count_;
+  common::hash::ObHashSet<int64_t> overflow_;
+  bool overflow_inited_;
+};
+
+} // namespace
+
+int ObTextDaaTIter::compute_count_only_total()
+{
+  int ret = OB_SUCCESS;
+  CountOnlyBitmap bitmap;
+  if (OB_FAIL(bitmap.init(iter_allocator_))) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < dim_iters_->count(); ++i) {
+      ObTextRetrievalDaaTTokenIter *token_iter =
+          static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i));
+      bool done = false;
+      while (OB_SUCC(ret) && !done) {
+        int64_t batch_count = 0;
+        common::ObDatumVector ids;
+        ret = token_iter->get_next_batch_ids(batch_count, ids);
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          done = true;
+        } else if (OB_FAIL(ret)) {
+        } else if (OB_ISNULL(ids.datums_) || batch_count <= 0) {
+          done = true;
+        } else {
+          int64_t bitmap_bits = bitmap.bits_count();
+          uint64_t *bitmap_bits_ptr = bitmap.bits();
+          for (int64_t j = 0; OB_SUCC(ret) && j < batch_count; ++j) {
+            const ObDatum *id = ids.datums_ + j;
+            int64_t doc_seq_id = 0;
+            if (OB_ISNULL(id) || id->len_ < 16) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("invalid doc id for count only", K(ret), KP(id));
+            } else if (FALSE_IT(MEMCPY(&doc_seq_id, id->ptr_ + 8, sizeof(doc_seq_id)))) {
+            } else if (OB_LIKELY(doc_seq_id >= 0 && doc_seq_id < bitmap_bits)) {
+              bitmap_bits_ptr[doc_seq_id >> 6] |= (1ULL << (doc_seq_id & 63));
+            } else if (OB_FAIL(bitmap.add(doc_seq_id))) {
+            } else {
+              bitmap_bits = bitmap.bits_count();
+              bitmap_bits_ptr = bitmap.bits();
+            }
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      count_only_total_ = bitmap.count();
+    }
+  }
+  return ret;
+}
+
 
 } // namespace storage
 } // namespace oceanbase

@@ -394,6 +394,19 @@ int ObSRDaaTIterImpl::cache_result(int64_t &count, const ObDatum &id_datum, cons
   const common::ObLimitParam *limit_param= iter_param_->limit_param_;
   const int64_t limit = limit_param->limit_;
   const int64_t offset = limit_param->offset_;
+  if (iter_param_->need_count_only()) {
+    ++input_row_cnt_;
+    if (limit_param->is_valid() && input_row_cnt_ <= offset) {
+      // skip offset rows
+    } else {
+      ++count;
+      ++output_row_cnt_;
+      if (limit_param->is_valid() && output_row_cnt_ >= limit) {
+        ret = OB_ITER_END;
+      }
+    }
+    return ret;
+  }
   ++input_row_cnt_;
   if (limit_param->is_valid() && input_row_cnt_ <= offset) {
     // TODO: Maybe we should not process offset logic here
@@ -415,6 +428,9 @@ int ObSRDaaTIterImpl::cache_result(int64_t &count, const ObDatum &id_datum, cons
 int ObSRDaaTIterImpl::project_results(const int64_t count)
 {
   int ret = OB_SUCCESS;
+  if (iter_param_->need_count_only()) {
+    return ret;
+  }
   ObExpr *relevance_proj_expr = iter_param_->relevance_proj_expr_;
   ObExpr *id_proj_expr = iter_param_->id_proj_expr_;
   ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
@@ -422,21 +438,21 @@ int ObSRDaaTIterImpl::project_results(const int64_t count)
 
   if (eval_ctx->is_vectorized()) {
     sql::ObBitVector &id_evaluated_flags = id_proj_expr->get_evaluated_flags(*eval_ctx);
+    id_proj_expr->set_evaluated_projected(*eval_ctx);
     for (int64_t i = 0; i < count; ++i) {
       guard.set_batch_idx(i);
       ObDatum &id_proj_datum = id_proj_expr->locate_datum_for_write(*eval_ctx);
       set_datum_func_(id_proj_datum, buffered_domain_ids_[i]);
       id_evaluated_flags.set(i);
-      id_proj_expr->set_evaluated_projected(*eval_ctx);
     }
     if (iter_param_->need_project_relevance()) {
       sql::ObBitVector &relevance_evaluated_flags = relevance_proj_expr->get_evaluated_flags(*eval_ctx);
+      relevance_proj_expr->set_evaluated_projected(*eval_ctx);
       for (int64_t i = 0; i < count; ++i) {
         guard.set_batch_idx(i);
         ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
         relevance_proj_datum.set_double(buffered_relevances_[i]);
         relevance_evaluated_flags.set(i);
-        relevance_proj_expr->set_evaluated_projected(*eval_ctx);
       }
     }
   } else if (OB_UNLIKELY(1 != count)) {

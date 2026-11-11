@@ -1894,6 +1894,22 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
 
   if (OB_SUCC(ret)) {
     root_ctdef = ir_scan_ctdef;
+    if (!cg_ctx.is_func_lookup_
+        && !cg_ctx.is_es_match_
+        && !cg_ctx.is_merge_fts_index_
+        && !cg_ctx.is_vec_iter_func_lookup_
+        && nullptr != tr_info.match_expr_
+        && NATURAL_LANGUAGE_MODE == tr_info.match_expr_->get_mode_flag()
+        && !tr_info.need_calc_relevance_
+        && nullptr == tr_info.pushdown_match_filter_
+        && nullptr == tr_info.topk_limit_expr_
+        && !tr_info.need_sort()
+        && !tr_info.need_block_max_scan()
+        && !op.get_index_back()
+        && op.get_output_exprs().empty()
+        && op.get_filter_exprs().empty()) {
+      ir_scan_ctdef->count_only_ = true;
+    }
     if (OB_FAIL(generate_text_ir_spec_exprs(tr_info, *ir_scan_ctdef))) {
     } else {
       const ObCostTableScanInfo *est_cost_info = op.get_est_cost_info();

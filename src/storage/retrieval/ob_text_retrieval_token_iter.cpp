@@ -539,6 +539,40 @@ int ObTextRetrievalDaaTTokenIter::get_next_batch(const int64_t capacity, int64_t
   return OB_NOT_IMPLEMENT;
 }
 
+int ObTextRetrievalDaaTTokenIter::get_next_batch_ids(
+    int64_t &count, common::ObDatumVector &ids)
+{
+  int ret = OB_SUCCESS;
+  count = 0;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+  } else if (!eval_ctx_->is_vectorized()) {
+    if (OB_FAIL(token_iter_->get_next_row())) {
+      if (OB_UNLIKELY(OB_ITER_END != ret)) {
+        LOG_WARN("fail to get next row for count only", K(ret));
+      }
+    } else {
+      count = 1;
+    }
+  } else {
+    ret = token_iter_->get_next_batch(max_batch_size_, count);
+    if (OB_ITER_END == ret) {
+      if (count > 0) {
+        ret = OB_SUCCESS;
+      }
+    } else if (OB_FAIL(ret)) {
+      LOG_WARN("fail to get next batch for count only", K(ret));
+    }
+  }
+  if (OB_SUCC(ret) && count > 0) {
+    ids = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
+    if (OB_ISNULL(ids.datums_)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  return ret;
+}
+
 int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
 {
   int ret = OB_SUCCESS;
