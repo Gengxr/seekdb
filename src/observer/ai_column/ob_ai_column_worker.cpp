@@ -105,6 +105,7 @@ void ObAIColumnWorker::run1()
   int64_t last_maintenance_ts = 0;
   bool recovered = false;
   lib::set_thread_name("AIColumnWorker");
+  int64_t idle_interval_us = IDLE_INTERVAL_US;
   while (!has_set_stop()) {
     bool found = false;
     if (SS_SERVING != GCTX.status_ || OB_ISNULL(GCTX.sql_proxy_) || OB_ISNULL(GCTX.schema_service_)) {
@@ -135,7 +136,12 @@ void ObAIColumnWorker::run1()
       ret = OB_SUCCESS;
     }
     if (!found) {
-      ob_usleep(IDLE_INTERVAL_US);
+      ob_usleep(idle_interval_us);
+      if (idle_interval_us < MAX_IDLE_INTERVAL_US) {
+        idle_interval_us = MIN(idle_interval_us * 2, MAX_IDLE_INTERVAL_US);
+      }
+    } else {
+      idle_interval_us = IDLE_INTERVAL_US;
     }
   }
 }
