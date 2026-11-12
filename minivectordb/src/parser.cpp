@@ -3,7 +3,9 @@
 
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cstdlib>
+#include <cstring>
 
 namespace mvd {
 
@@ -855,6 +857,77 @@ static float vector_element(double val) {
   return (float)val;
 }
 
+// Powers of ten that are exactly representable as doubles, used by the
+// correctly-rounded fast path below.
+constexpr double kPow10[] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+                             1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+
+// Convert an already validated [-+]digits[.digits][e[+-]digits] span to double
+// without allocating. Clinger's fast path covers the short literals a vector
+// column actually contains: a mantissa below 2^53 scaled by one exact power of
+// ten needs a single IEEE operation, which rounds once and therefore matches
+// strtod bit for bit. Returns false where the original code failed with ERANGE
+// (overflow, and results that underflow into subnormals or zero).
+static bool decimal_to_double(const char* b, const char* e, double* out) {
+  const char* p = b;
+  bool neg = false;
+  if (p < e && (*p == '-' || *p == '+')) {
+    neg = (*p == '-');
+    ++p;
+  }
+  uint64_t mant = 0;
+  int64_t exp10 = 0;
+  bool dropped = false;  // significant digits that did not fit in the mantissa
+  auto accumulate = [&](char c, bool frac) {
+    if (mant <= (UINT64_MAX - 9) / 10) {
+      mant = mant * 10 + (uint64_t)(c - '0');
+      if (frac) --exp10;
+    } else if (c != '0') {
+      dropped = true;
+      if (!frac) ++exp10;
+    }
+  };
+  for (; p < e && *p >= '0' && *p <= '9'; ++p) accumulate(*p, false);
+  if (p < e && *p == '.') {
+    for (++p; p < e && *p >= '0' && *p <= '9'; ++p) accumulate(*p, true);
+  }
+  if (p < e && (*p == 'e' || *p == 'E')) {
+    ++p;
+    bool eneg = false;
+    if (p < e && (*p == '-' || *p == '+')) {
+      eneg = (*p == '-');
+      ++p;
+    }
+    int64_t ev = 0;
+    for (; p < e && *p >= '0' && *p <= '9'; ++p) {
+      if (ev < 100000) ev = ev * 10 + (*p - '0');
+    }
+    exp10 += eneg ? -ev : ev;
+  }
+  if (!dropped && mant <= (1ull << 53) && exp10 >= -22 && exp10 <= 22) {
+    double v = (double)mant;
+    if (exp10 > 0) {
+      v *= kPow10[exp10];
+    } else if (exp10 < 0) {
+      v /= kPow10[-exp10];
+    }
+    *out = neg ? -v : v;
+    return true;
+  }
+  const char* start = b;
+  if (start < e && *start == '+') ++start;  // from_chars rejects a leading plus
+  double v = 0.0;
+  auto res = std::from_chars(start, e, v);
+  if (res.ec != std::errc() || res.ptr != e) return false;
+  if (v != 0.0) {
+    if (std::fabs(v) < std::numeric_limits<double>::min()) return false;  // subnormal
+  } else if (mant != 0) {
+    return false;  // underflowed to zero
+  }
+  *out = v;
+  return true;
+}
+
 std::vector<float> parse_vector_literal(std::string_view text) {
   std::vector<float> out;
   size_t p = 0;
@@ -892,12 +965,11 @@ std::vector<float> parse_vector_literal(std::string_view text) {
           p = save;
         }
       }
-      std::string num(text.substr(start, p - start));
-      char* endp = nullptr;
-      errno = 0;
-      double val = std::strtod(num.c_str(), &endp);
-      if (endp == nullptr || *endp != '\0' || errno == ERANGE) {
-        fail(ErrCode::InvalidVector, "bad vector element: " + num);
+      const char* num_b = text.data() + start;
+      const char* num_e = text.data() + p;
+      double val = 0.0;
+      if (!decimal_to_double(num_b, num_e, &val)) {
+        fail(ErrCode::InvalidVector, std::string("bad vector element: ") + std::string(num_b, num_e));
       }
       out.push_back(vector_element(val));
       skip_vector_ws(text, p);

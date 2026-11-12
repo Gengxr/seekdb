@@ -498,6 +498,26 @@ void Store::read_slot_row(const Table& t, const Slot& s, RowView& out) {
   out.data = read_buf_.data();
 }
 
+namespace {
+
+// Append one slot id to an equality index.  The row is already in the log
+// encoding, so the key is decoded straight out of those bytes.
+void eq_index_add(const Table& t, Table::EqIndex& ix, int32_t col, uint32_t slot, const char* row,
+                  uint32_t len) {
+  uint32_t vlen = 0;
+  const char* p = column_ptr(t.schema, col, row, len, &vlen);
+  if (!p) return;
+  if (t.schema.cols[(size_t)col].type == ColType::BigInt) {
+    int64_t key = 0;
+    std::memcpy(&key, p, sizeof key);
+    ix.by_int[key].push_back(slot);
+  } else {
+    ix.by_str[std::string(p, vlen)].push_back(slot);
+  }
+}
+
+}  // namespace
+
 void Store::apply_put(Table& t, int64_t pk, const char* row, uint32_t len, uint32_t vec_rel,
                       uint64_t file_off, bool from_replay) {
   uint32_t sid = t.pk_index.find(pk);
@@ -540,6 +560,41 @@ void Store::apply_put(Table& t, int64_t pk, const char* row, uint32_t len, uint3
   } else if (from_replay) {
     s.arena_off = 0;
   }
+  // Keep any already-built equality index in step with the committed rows.
+  for (size_t c = 0; c < t.eq.size(); ++c) {
+    if (t.eq[c].built) eq_index_add(t, t.eq[c], (int32_t)c, sid, row, len);
+  }
+}
+
+const std::vector<uint32_t>* Store::eq_candidates(Table& t, int32_t col, const Value& lit) {
+  static const std::vector<uint32_t> kNone;
+  if (col < 0 || (size_t)col >= t.schema.cols.size() || !t.cached) return nullptr;
+  const Column& column = t.schema.cols[(size_t)col];
+  if (column.type == ColType::Vector) return nullptr;
+  if (t.eq.size() != t.schema.cols.size()) t.eq.resize(t.schema.cols.size());
+  Table::EqIndex& ix = t.eq[(size_t)col];
+  if (ix.disabled) return nullptr;
+  if (!ix.built) {
+    for (uint32_t i = 0; i < (uint32_t)t.slots.size(); ++i) {
+      const Slot& s = t.slots[i];
+      if (s.dead()) continue;
+      eq_index_add(t, ix, col, i, t.arena.data() + s.arena_off, s.len());
+    }
+    ix.built = true;
+    if (ix.by_str.size() > 4096) {
+      // A near-unique column would cost more memory than the scan it saves.
+      ix.disabled = true;
+      std::unordered_map<std::string, std::vector<uint32_t>>().swap(ix.by_str);
+      std::unordered_map<int64_t, std::vector<uint32_t>>().swap(ix.by_int);
+      return nullptr;
+    }
+  }
+  if (column.type == ColType::BigInt) {
+    auto it = ix.by_int.find(lit.i);
+    return it == ix.by_int.end() ? &kNone : &it->second;
+  }
+  auto it = ix.by_str.find(lit.s);
+  return it == ix.by_str.end() ? &kNone : &it->second;
 }
 
 void Store::apply_delete(Table& t, int64_t pk) {

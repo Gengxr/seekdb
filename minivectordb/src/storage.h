@@ -61,6 +61,20 @@ struct Table {
   uint64_t live_bytes = 0;
   uint64_t live_rows = 0;
 
+  // Lazily built equality indexes (one entry per non-vector column).  A scan
+  // with one equality predicate can visit only the matching slots instead of
+  // the whole arena.  Entries are appended, never removed, so an updated or
+  // deleted row may leave a stale slot id behind; every candidate is
+  // re-checked against the row bytes, so staleness costs time but never
+  // changes the answer.
+  struct EqIndex {
+    bool built = false;
+    bool disabled = false;  // high-cardinality column: not worth the memory
+    std::unordered_map<int64_t, std::vector<uint32_t>> by_int;
+    std::unordered_map<std::string, std::vector<uint32_t>> by_str;
+  };
+  std::vector<EqIndex> eq;
+
   int32_t vec_idx() const { return schema.find_vec(); }
 };
 
@@ -107,6 +121,10 @@ class Store {
   bool exists(Table& t, int64_t pk) const;
   // Row bytes for a live committed slot.
   void read_slot_row(const Table& t, const Slot& s, RowView& out);
+
+  // Candidate slot ids for `col = lit`, or nullptr when no equality index
+  // applies to this column.  Builds the index on first use.
+  const std::vector<uint32_t>* eq_candidates(Table& t, int32_t col, const Value& lit);
 
   // Transaction control.
   bool in_txn() const { return in_txn_; }

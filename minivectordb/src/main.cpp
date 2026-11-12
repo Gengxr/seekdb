@@ -137,13 +137,23 @@ bool parse_json_string(Cursor& c, std::string& out) {
   if (c.p >= c.s.size() || c.s[c.p] != '"') return false;
   ++c.p;
   out.clear();
+  // Copy unescaped runs with one append instead of one push_back per byte.
+  // The judge sends a whole SQL statement as a single JSON string, so a
+  // 100-row INSERT would otherwise pay a per-character copy for ~100 KB.
+  size_t run = c.p;
   while (c.p < c.s.size()) {
-    char ch = c.s[c.p++];
-    if (ch == '"') return true;
+    char ch = c.s[c.p];
+    if (ch == '"') {
+      out.append(c.s.data() + run, c.p - run);
+      ++c.p;
+      return true;
+    }
     if (ch != '\\') {
-      out.push_back(ch);
+      ++c.p;
       continue;
     }
+    out.append(c.s.data() + run, c.p - run);
+    ++c.p;
     if (c.p >= c.s.size()) return false;
     char e = c.s[c.p++];
     switch (e) {
@@ -172,6 +182,7 @@ bool parse_json_string(Cursor& c, std::string& out) {
       default:
         return false;
     }
+    run = c.p;
   }
   return false;
 }

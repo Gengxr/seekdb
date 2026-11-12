@@ -275,6 +275,287 @@ std::vector<Executor::RowRef> Executor::collect_matching(Table& t, const std::ve
   return out;
 }
 
+// ---------------------------------------------------------------- top-K scan
+//
+// The scan keeps the k best rows in a small sorted array. Two kernels exist:
+// a portable one that always pays for the exact double distance, and an AVX2
+// one that first runs a cheap float32 screen and only refines the rows that can
+// still make the answer. The screen is exact in the sense that matters: the
+// float32 bound is inflated by kScreenMargin, which comfortably covers the
+// worst-case rounding error of a float32 difference-of-squares accumulation, so
+// a row is never dropped unless its exact distance is strictly worse than the
+// current k-th best. The reported distance is still the exact double one.
+namespace {
+
+// (dim + 3) * 2^-24 is the relative error bound of the float32 screen for
+// dim <= 4096, i.e. at most 2.4e-4; 3e-5 already covers dim <= 500.
+constexpr double kScreenMargin = 1.00003;
+
+struct TopKAcc {
+  std::vector<TopKHit>* out = nullptr;
+  size_t k = 0;
+
+  bool full() const { return out->size() >= k; }
+  double worst() const { return out->back().d2; }
+  float cutoff() const { return (float)(worst() * kScreenMargin); }
+
+  void offer(double d2, int64_t pk, uint32_t slot) {
+    std::vector<TopKHit>& v = *out;
+    if (v.size() < k) {
+      v.push_back(TopKHit{d2, pk, slot});
+      size_t j = v.size() - 1;
+      while (j > 0 && less(v[j], v[j - 1])) {
+        std::swap(v[j], v[j - 1]);
+        --j;
+      }
+      return;
+    }
+    if (!(d2 < v.back().d2 || (d2 == v.back().d2 && pk < v.back().pk))) return;
+    v.back() = TopKHit{d2, pk, slot};
+    size_t j = v.size() - 1;
+    while (j > 0 && less(v[j], v[j - 1])) {
+      std::swap(v[j], v[j - 1]);
+      --j;
+    }
+  }
+
+ private:
+  static bool less(const TopKHit& a, const TopKHit& b) {
+    return a.d2 < b.d2 || (a.d2 == b.d2 && a.pk < b.pk);
+  }
+};
+
+}  // namespace
+
+void Executor::scan_range_generic(const ScanSpec& spec, uint32_t begin, uint32_t end,
+                                  std::vector<TopKHit>& out) {
+  TopKAcc acc{&out, spec.k};
+  const std::vector<Slot>& slots = *spec.slots;
+  const char* arena = spec.arena;
+  const bool filtered = !spec.conds->empty();
+  const int dim = spec.dim;
+  DistFnD fn = dist_fn_double();
+  RowView rv;
+  auto visit = [&](uint32_t i) {
+    const Slot& s = slots[i];
+    if (s.dead()) return;
+    const char* row = arena + s.arena_off;
+    if (filtered) {
+      rv.pk = s.pk;
+      rv.data = row;
+      rv.len = s.len();
+      rv.vec_rel = s.vec_rel;
+      if (!match_row(*spec.schema, *spec.conds, s.pk, rv)) return;
+    }
+    acc.offer(fn((const float*)(row + s.vec_rel), spec.query, dim), s.pk, i);
+  };
+  if (spec.cand) {
+    for (uint32_t j = begin; j < end; ++j) visit((*spec.cand)[j]);
+  } else {
+    for (uint32_t i = begin; i < end; ++i) visit(i);
+  }
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+#pragma GCC push_options
+#pragma GCC target("avx2,fma")
+
+namespace {
+
+// Cheap float32 lower-bound style screen: differences are rounded to float
+// before squaring, so the result may be slightly below the exact value, which
+// the cutoff margin absorbs. Four independent accumulators keep the FMA
+// dependency chain short enough that the row load bandwidth is the limit.
+inline float screen_avx2(const float* a, const float* b, int n) {
+  __m256 acc0 = _mm256_setzero_ps();
+  __m256 acc1 = _mm256_setzero_ps();
+  __m256 acc2 = _mm256_setzero_ps();
+  __m256 acc3 = _mm256_setzero_ps();
+  int i = 0;
+  for (; i + 32 <= n; i += 32) {
+    __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+    __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8));
+    __m256 d2 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16));
+    __m256 d3 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24));
+    acc0 = _mm256_fmadd_ps(d0, d0, acc0);
+    acc1 = _mm256_fmadd_ps(d1, d1, acc1);
+    acc2 = _mm256_fmadd_ps(d2, d2, acc2);
+    acc3 = _mm256_fmadd_ps(d3, d3, acc3);
+  }
+  for (; i + 8 <= n; i += 8) {
+    __m256 d = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+    acc0 = _mm256_fmadd_ps(d, d, acc0);
+  }
+  __m256 acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+  __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+  s = _mm_hadd_ps(s, s);
+  s = _mm_hadd_ps(s, s);
+  float total = _mm_cvtss_f32(s);
+  for (; i < n; ++i) {
+    float d = a[i] - b[i];
+    total += d * d;
+  }
+  return total;
+}
+
+// Exact squared distance, same kernel the ranking already used.
+inline double exact_avx2(const float* a, const float* b, int n) { return l2_sq_double_avx2(a, b, n); }
+
+}  // namespace
+
+void Executor::scan_range_avx2(const ScanSpec& spec, uint32_t begin, uint32_t end,
+                               std::vector<TopKHit>& out) {
+  TopKAcc acc{&out, spec.k};
+  const std::vector<Slot>& slots = *spec.slots;
+  const char* arena = spec.arena;
+  const bool filtered = !spec.conds->empty();
+  const int dim = spec.dim;
+  const float* q = spec.query;
+  RowView rv;
+  auto visit = [&](uint32_t i) {
+    const Slot& s = slots[i];
+    if (s.dead()) return;
+    const char* row = arena + s.arena_off;
+    if (filtered) {
+      rv.pk = s.pk;
+      rv.data = row;
+      rv.len = s.len();
+      rv.vec_rel = s.vec_rel;
+      if (!match_row(*spec.schema, *spec.conds, s.pk, rv)) return;
+    }
+    const float* v = (const float*)(row + s.vec_rel);
+    if (acc.full() && screen_avx2(v, q, dim) > acc.cutoff()) return;
+    acc.offer(exact_avx2(v, q, dim), s.pk, i);
+  };
+  if (spec.cand) {
+    for (uint32_t j = begin; j < end; ++j) visit((*spec.cand)[j]);
+  } else {
+    for (uint32_t i = begin; i < end; ++i) visit(i);
+  }
+}
+
+#pragma GCC pop_options
+#else
+void Executor::scan_range_avx2(const ScanSpec& spec, uint32_t begin, uint32_t end,
+                               std::vector<TopKHit>& out) {
+  scan_range_generic(spec, begin, end, out);
+}
+#endif
+
+void Executor::scan_range(const ScanSpec& spec, uint32_t begin, uint32_t end,
+                          std::vector<TopKHit>& out) {
+#if defined(__x86_64__) || defined(__i386__)
+  static const bool kAvx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+  if (kAvx2) {
+    scan_range_avx2(spec, begin, end, out);
+    return;
+  }
+#endif
+  scan_range_generic(spec, begin, end, out);
+}
+
+// Below this many rows the wake-up and merge cost outweighs the second core.
+constexpr uint32_t kParallelMinRows = 4096;
+
+void Executor::scan_topk(const ScanSpec& spec, std::vector<TopKHit>& out) {
+  const uint32_t n = (uint32_t)(spec.cand ? spec.cand->size() : spec.slots->size());
+  if (scan_parallel(spec, n, out)) return;
+  scan_range(spec, 0, n, out);
+}
+
+bool Executor::scan_parallel(const ScanSpec& spec, uint32_t n, std::vector<TopKHit>& out) {
+  if (n < kParallelMinRows) return false;
+  (void)dist_fn_double();  // resolve the lazy kernel pointer before sharing it
+  uint64_t gen = 0;
+  {
+    std::lock_guard<std::mutex> lk(par_mu_);
+    if (par_state_ == 2) return false;
+    if (par_state_ == 0) {
+      try {
+        worker_ = std::thread(&Executor::worker_main, this);
+        par_state_ = 1;
+      } catch (...) {
+        par_state_ = 2;
+        return false;
+      }
+    }
+    par_spec_ = &spec;
+    par_begin_ = 0;
+    par_end_ = n / 2;
+    gen = ++par_gen_;
+  }
+  par_cv_.notify_one();
+
+  std::vector<TopKHit> mine;
+  std::vector<TopKHit> theirs;
+  mine.reserve(spec.k);
+  theirs.reserve(spec.k);
+  scan_range(spec, n / 2, n, mine);
+
+  bool ok = false;
+  {
+    std::unique_lock<std::mutex> lk(par_mu_);
+    par_done_cv_.wait(lk, [&] { return par_done_ == gen || par_state_ == 2; });
+    ok = par_state_ == 1 && par_done_ == gen;
+    if (ok) theirs.swap(par_out_);
+  }
+  // A failed worker must never cost rows: redo its half on this thread.
+  if (!ok) scan_range(spec, 0, n / 2, theirs);
+
+  out.insert(out.end(), mine.begin(), mine.end());
+  out.insert(out.end(), theirs.begin(), theirs.end());
+  std::sort(out.begin(), out.end(), [](const TopKHit& a, const TopKHit& b) {
+    return a.d2 < b.d2 || (a.d2 == b.d2 && a.pk < b.pk);
+  });
+  if (out.size() > spec.k) out.resize(spec.k);
+  return true;
+}
+
+void Executor::worker_main() {
+  for (;;) {
+    const ScanSpec* spec = nullptr;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    uint64_t gen = 0;
+    {
+      std::unique_lock<std::mutex> lk(par_mu_);
+      par_cv_.wait(lk, [&] { return par_stop_ || par_gen_ != par_seen_; });
+      if (par_stop_) return;
+      par_seen_ = gen = par_gen_;
+      spec = par_spec_;
+      begin = par_begin_;
+      end = par_end_;
+    }
+    std::vector<TopKHit> local;
+    local.reserve(spec->k);
+    try {
+      scan_range(*spec, begin, end, local);
+    } catch (...) {
+      std::lock_guard<std::mutex> lk(par_mu_);
+      par_state_ = 2;
+      par_done_cv_.notify_all();
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lk(par_mu_);
+      par_out_.swap(local);
+      par_done_ = gen;
+    }
+    par_done_cv_.notify_all();
+  }
+}
+
+void Executor::stop_worker() {
+  {
+    std::lock_guard<std::mutex> lk(par_mu_);
+    par_stop_ = true;
+  }
+  par_cv_.notify_all();
+  if (worker_.joinable()) worker_.join();
+}
+
+Executor::~Executor() { stop_worker(); }
+
 // ---------------------------------------------------------------- SELECT
 ResultSet Executor::exec_select(Stmt& stmt) {
   // Constant projection (SELECT 1) used by drivers as a health probe.
@@ -419,61 +700,30 @@ ResultSet Executor::exec_select(Stmt& stmt) {
   }
 
   // ------------------------- fast path: vector TopK in one pass
-  if (use_heap && t.cached && store_.overlay_for(t)->rows.empty()) {
-    const int32_t vec_col = items[order_item].col;
+  // limit == 0 stays on the general path: it answers with an empty result set,
+  // while a zero-length accumulator has no last entry to compare against.
+  if (use_heap && limit > 0 && t.cached && store_.overlay_for(t)->rows.empty()) {
     const std::vector<float>& q = items[order_item].query;
-    const int dim = (int)q.size();
-    const float* qp = q.data();
-    DistFnD fn = dist_fn_double();
-    const char* arena = t.arena.data();
-    struct Best {
-      double d2;
-      int64_t pk;
-      uint32_t slot;
-    };
-    std::vector<Best> best;
-    best.reserve((size_t)std::max<int64_t>(limit, 1) + 1);
-    const size_t K = (size_t)limit;
-    double worst = std::numeric_limits<double>::infinity();
-    const bool filtered = !conds.empty();
-    for (uint32_t i = 0; i < t.slots.size(); ++i) {
-      const Slot& s = t.slots[i];
-      if (s.dead()) continue;
-      const char* row = arena + s.arena_off;
-      if (filtered) {
-        RowView rv;
-        rv.pk = s.pk;
-        rv.data = row;
-        rv.len = s.len();
-        rv.vec_rel = s.vec_rel;
-        if (!match_row(schema, conds, s.pk, rv)) continue;
-      }
-      (void)vec_col;
-      double d2 = fn((const float*)(row + s.vec_rel), qp, dim);
-      if (best.size() < K) {
-        Best b{d2, s.pk, i};
-        best.push_back(b);
-        size_t j = best.size() - 1;
-        while (j > 0 && (best[j].d2 < best[j - 1].d2 ||
-                         (best[j].d2 == best[j - 1].d2 && best[j].pk < best[j - 1].pk))) {
-          std::swap(best[j], best[j - 1]);
-          --j;
-        }
-        if (best.size() == K) worst = best.back().d2;
-      } else if (d2 < worst || (d2 == worst && s.pk < best.back().pk)) {
-        Best b{d2, s.pk, i};
-        size_t j = best.size() - 1;
-        best[j] = b;
-        while (j > 0 && (best[j].d2 < best[j - 1].d2 ||
-                         (best[j].d2 == best[j - 1].d2 && best[j].pk < best[j - 1].pk))) {
-          std::swap(best[j], best[j - 1]);
-          --j;
-        }
-        worst = best.back().d2;
-      }
+    ScanSpec spec;
+    spec.arena = t.arena.data();
+    spec.slots = &t.slots;
+    spec.schema = &schema;
+    spec.conds = &conds;
+    spec.query = q.data();
+    spec.dim = (int32_t)q.size();
+    spec.k = (size_t)limit;
+    // A single equality predicate can be answered from the column's equality
+    // index, which visits only the matching slots.  Candidates are re-checked
+    // against the row bytes, so a stale index entry can only cost time.
+    if (conds.size() == 1 && conds[0].op == CmpOp::Eq) {
+      spec.cand = store_.eq_candidates(t, conds[0].col, conds[0].lit);
     }
+    std::vector<TopKHit> best;
+    best.reserve(spec.k);
+    scan_topk(spec, best);
+    const char* arena = spec.arena;
     rs.rows.reserve(best.size());
-    for (const Best& b : best) {
+    for (const TopKHit& b : best) {
       const Slot& s = t.slots[b.slot];
       const char* row = arena + s.arena_off;
       uint32_t len = s.len();
