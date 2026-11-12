@@ -562,7 +562,7 @@ void Store::apply_put(Table& t, int64_t pk, const char* row, uint32_t len, uint3
   }
   // Keep any already-built equality index in step with the committed rows.
   for (size_t c = 0; c < t.eq.size(); ++c) {
-    if (t.eq[c].built) eq_index_add(t, t.eq[c], (int32_t)c, sid, row, len);
+    if (t.eq[c].built && !t.eq[c].disabled) eq_index_add(t, t.eq[c], (int32_t)c, sid, row, len);
   }
 }
 
@@ -973,6 +973,9 @@ void Store::compact_log() {
     t->arena.clear();
     t->arena_live = 0;
     t->arena_garbage = 0;
+    // Slot ids are reassigned by the replay below, so any cached candidate list
+    // would point at the wrong rows.  Drop it and let it rebuild on first use.
+    t->eq.clear();
   }
   read_buf_off_ = 0;
   read_buf_len_ = 0;

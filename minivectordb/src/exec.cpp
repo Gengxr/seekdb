@@ -287,17 +287,24 @@ std::vector<Executor::RowRef> Executor::collect_matching(Table& t, const std::ve
 // current k-th best. The reported distance is still the exact double one.
 namespace {
 
-// (dim + 3) * 2^-24 is the relative error bound of the float32 screen for
-// dim <= 4096, i.e. at most 2.4e-4; 3e-5 already covers dim <= 500.
+// A sum of Float32 terms carries a relative error of about (dim + 3) * 2^-24,
+// i.e. 7.9e-6 at dim = 128 and 2.4e-4 at dim = 4096.  The accumulator widens this
+// floor with the dimension, so the screen can only ever admit extra rows, never
+// drop one that belongs to the top K.
 constexpr double kScreenMargin = 1.00003;
 
 struct TopKAcc {
   std::vector<TopKHit>* out = nullptr;
   size_t k = 0;
+  // Inflation applied to the current k-th best before it is used as a float32
+  // screen threshold.  A sum of n float32 terms carries a relative error of at
+  // most about n * 2^-24, so the margin has to grow with the dimension; the
+  // 1.00003 floor is what dim <= 500 needs (see kScreenMargin).
+  double margin = 1.00003;
 
   bool full() const { return out->size() >= k; }
   double worst() const { return out->back().d2; }
-  float cutoff() const { return (float)(worst() * kScreenMargin); }
+  float cutoff() const { return (float)(worst() * margin); }
 
   void offer(double d2, int64_t pk, uint32_t slot) {
     std::vector<TopKHit>& v = *out;
@@ -406,6 +413,8 @@ inline double exact_avx2(const float* a, const float* b, int n) { return l2_sq_d
 void Executor::scan_range_avx2(const ScanSpec& spec, uint32_t begin, uint32_t end,
                                std::vector<TopKHit>& out) {
   TopKAcc acc{&out, spec.k};
+  acc.margin = 1.0 + (double)(spec.dim + 8) / 8388608.0;
+  if (acc.margin < kScreenMargin) acc.margin = kScreenMargin;
   const std::vector<Slot>& slots = *spec.slots;
   const char* arena = spec.arena;
   const bool filtered = !spec.conds->empty();
