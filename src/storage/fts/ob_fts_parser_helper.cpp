@@ -309,6 +309,31 @@ int ObFTParseHelper::segment(
   return ret;
 }
 
+namespace {
+
+// Caches the parser descriptor, parser property and add-word flag resolved from a parser
+// name when no extra parser properties are given (the common case of TOKENIZE). All three
+// values are immutable after init and only refer to static descriptors and literals, so a
+// per-thread cache avoids re-parsing the name and rebuilding the property on every call.
+struct ObFTParserInitCache
+{
+  ObFTParserInitCache() : name_len_(-1), desc_(nullptr) { MEMSET(name_, 0, sizeof(name_)); }
+  char name_[OB_FT_PARSER_NAME_LENGTH];
+  int64_t name_len_;
+  const ObIFTParserDesc *desc_;
+  ObFTParser parser_;
+  ObFTParserProperty property_;
+  ObAddWordFlag flag_;
+};
+
+ObFTParserInitCache &get_ft_parser_init_cache()
+{
+  static thread_local ObFTParserInitCache cache;
+  return cache;
+}
+
+} // namespace
+
 ObFTParseHelper::ObFTParseHelper()
     : allocator_(nullptr),
     parser_desc_(nullptr),
@@ -330,10 +355,20 @@ int ObFTParseHelper::init(
     const common::ObString &parser_properties)
 {
   int ret = OB_SUCCESS;
+  ObFTParserInitCache &init_cache = get_ft_parser_init_cache();
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
   } else if (OB_ISNULL(allocator) || OB_UNLIKELY(parser_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (parser_properties.empty() && parser_name.length() < OB_FT_PARSER_NAME_LENGTH
+             && init_cache.name_len_ == parser_name.length()
+             && 0 == MEMCMP(init_cache.name_, parser_name.ptr(), parser_name.length())) {
+    parser_name_ = init_cache.parser_;
+    parser_property_ = init_cache.property_;
+    parser_desc_ = init_cache.desc_;
+    add_word_flag_ = init_cache.flag_;
+    allocator_ = allocator;
+    is_inited_ = true;
   } else if (OB_FAIL(parser_name_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
   } else if (OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
   } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
@@ -343,6 +378,15 @@ int ObFTParseHelper::init(
   } else {
     allocator_ = allocator;
     is_inited_ = true;
+    if (parser_properties.empty() && parser_name.length() < OB_FT_PARSER_NAME_LENGTH) {
+      // publish the resolved state for the next call on this thread
+      MEMCPY(init_cache.name_, parser_name.ptr(), parser_name.length());
+      init_cache.name_len_ = parser_name.length();
+      init_cache.desc_ = parser_desc_;
+      init_cache.parser_ = parser_name_;
+      init_cache.property_ = parser_property_;
+      init_cache.flag_ = add_word_flag_;
+    }
   }
   if (OB_FAIL(ret) && OB_UNLIKELY(!is_inited_)) {
     reset();

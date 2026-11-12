@@ -59,6 +59,7 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
 
   ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
+  param.allocator_ = &temp_allocator;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
@@ -122,7 +123,7 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
 }
 
 ObExprTokenize::TokenizeParam ::TokenizeParam()
-  : allocator_(ObMemAttr("TokenizeParam")),
+  : allocator_(nullptr),
     parser_name_(ObString(OB_DEFAULT_FULLTEXT_PARSER_NAME)),
     meta_(),
     fulltext_(),
@@ -137,6 +138,8 @@ int ObExprTokenize::TokenizeParam::parse_json_param(const ObIJsonBase *obj)
   ObIJsonBase *val;
 
   if (OB_UNLIKELY(nullptr == obj)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(allocator_)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (ObJsonNodeType::J_OBJECT != obj->json_type()) {
     ret = OB_INVALID_ARGUMENT;
@@ -174,7 +177,7 @@ int ObExprTokenize::TokenizeParam::parse_json_param(const ObIJsonBase *obj)
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser arguments");
     } else {
       ObString json_str;
-      if (OB_FAIL(storage::ObFTParserJsonProps::tokenize_array_to_props_json(allocator_, val, json_str))) {
+      if (OB_FAIL(storage::ObFTParserJsonProps::tokenize_array_to_props_json(*allocator_, val, json_str))) {
         ObSqlString message;
         message.append_fmt("format in %s form", ADDITIONAL_ARGS_STR);
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, message.ptr());
@@ -221,14 +224,43 @@ int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, To
   int ret = OB_SUCCESS;
   storage::ObFTParser parser;
 
-  char *parser_name_buf = nullptr;
-  if (OB_ISNULL(parser_name_buf
-                = static_cast<char *>(param.allocator_.alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(parser.init(input_str))) {
-  } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+  // The inner parser name (e.g. "ik.1") is a pure function of the raw parser name for the
+  // built-in parsers, so keep the last result in thread local storage and avoid a per-call
+  // allocation plus string formatting. The cache key is the exact raw name bytes.
+  static thread_local char cached_raw_name[storage::OB_FT_PARSER_NAME_LENGTH];
+  static thread_local int64_t cached_raw_name_len = -1;
+  static thread_local char cached_inner_name[storage::OB_FT_PARSER_NAME_LENGTH];
+  static thread_local int64_t cached_inner_name_len = 0;
+
+  if (OB_ISNULL(param.allocator_)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (input_str.length() < storage::OB_FT_PARSER_NAME_LENGTH
+      && cached_raw_name_len == input_str.length()
+      && 0 == MEMCMP(cached_raw_name, input_str.ptr(), input_str.length())) {
+    param.parser_name_.assign_ptr(cached_inner_name, static_cast<int32_t>(cached_inner_name_len));
+  } else if (input_str.length() >= storage::OB_FT_PARSER_NAME_LENGTH) {
+    // cannot be a valid built-in parser name, keep the original path to report the error
+    char *parser_name_buf = nullptr;
+    if (OB_ISNULL(parser_name_buf
+                  = static_cast<char *>(param.allocator_->alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_FAIL(parser.init(input_str))) {
+    } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+    } else {
+      param.parser_name_ = ObString::make_string(parser_name_buf);
+    }
   } else {
-    param.parser_name_ = ObString::make_string(parser_name_buf);
+    // invalidate the cache before rewriting its buffers so that a failed attempt can not
+    // leave a stale name paired with a partially written cached string
+    cached_raw_name_len = -1;
+    if (OB_FAIL(parser.init(input_str))) {
+    } else if (OB_FAIL(parser.serialize_to_str(cached_inner_name, storage::OB_FT_PARSER_NAME_LENGTH))) {
+    } else {
+      cached_inner_name_len = STRLEN(cached_inner_name);
+      MEMCPY(cached_raw_name, input_str.ptr(), input_str.length());
+      cached_raw_name_len = input_str.length();
+      param.parser_name_.assign_ptr(cached_inner_name, static_cast<int32_t>(cached_inner_name_len));
+    }
   }
   return ret;
 }
@@ -375,13 +407,15 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
 
-  if (OB_FAIL(parser_properties.init())) {
+  if (OB_ISNULL(allocator_)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(parser_properties.init())) {
   } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
                                                              ObCollationType::CS_TYPE_UTF8MB4_BIN,
                                                              true))) {
-  } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  } else if (OB_FAIL(parser_properties.to_format_json(*allocator_, properties_))) {
   }
 
   return ret;

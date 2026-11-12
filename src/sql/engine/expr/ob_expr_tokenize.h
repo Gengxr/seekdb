@@ -67,8 +67,10 @@ private:
     int try_load_dictionary_for_ik();
 
   public:
-    // for property and tmp json string
-    mutable ObArenaAllocator allocator_;
+    // borrowed allocator for property and tmp json string, owned by the caller
+    // (the expression evaluation temp allocator), so that tokenize does not need
+    // to maintain a private arena per evaluation.
+    common::ObIAllocator *allocator_;
     ObString parser_name_;
     ObString properties_;
     ObObjMeta meta_;
