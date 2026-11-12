@@ -101,6 +101,11 @@ class Executor {
     const float* query = nullptr;
     // Optional candidate slot ids (equality index hit); null scans every slot.
     const std::vector<uint32_t>* cand = nullptr;
+    // Optional fixed-point copy of the vector column (slot-major, `dim` bytes
+    // per slot) plus the value of one int8 unit.  When present, a cheap screen
+    // runs first and only its survivors pay for the exact distance.
+    const int8_t* qvec = nullptr;
+    float qstep = 0.0f;
     int32_t dim = 0;
     size_t k = 0;
   };
@@ -120,6 +125,13 @@ class Executor {
   // half keeps its own k best and the two lists are merged, which is exact
   // because (distance, pk) is a total order.
   void scan_topk(const ScanSpec& spec, std::vector<TopKHit>& out);
+  // Builds (or rebuilds) the fixed-point copy of the table's vector column.
+  // Returns false when the table is not cached or the copy would be too large.
+  bool ensure_qcache(Table& t);
+  // Quantized screen: keeps the rows that can still reach the top K and pays for
+  // the exact double distance on those only.  Returns false when it cannot prove
+  // the answer exact, in which case the caller falls back to scan_topk.
+  bool scan_topk_i8(const ScanSpec& spec, std::vector<TopKHit>& out);
   void scan_range(const ScanSpec& spec, uint32_t begin, uint32_t end, std::vector<TopKHit>& out);
   void scan_range_avx2(const ScanSpec& spec, uint32_t begin, uint32_t end, std::vector<TopKHit>& out);
   void scan_range_generic(const ScanSpec& spec, uint32_t begin, uint32_t end,

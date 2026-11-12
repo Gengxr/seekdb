@@ -2,6 +2,8 @@
 #include "exec.h"
 
 #include <immintrin.h>
+#include <chrono>
+#include <cmath>
 #include <unordered_set>
 
 namespace mvd {
@@ -467,9 +469,222 @@ void Executor::scan_range(const ScanSpec& spec, uint32_t begin, uint32_t end,
 constexpr uint32_t kParallelMinRows = 4096;
 
 void Executor::scan_topk(const ScanSpec& spec, std::vector<TopKHit>& out) {
+  // The fixed-point screen is single-threaded but several times cheaper per row;
+  // it wins whenever it can prove the answer exact.
+  if (spec.qvec && scan_topk_i8(spec, out)) return;
   const uint32_t n = (uint32_t)(spec.cand ? spec.cand->size() : spec.slots->size());
   if (scan_parallel(spec, n, out)) return;
   scan_range(spec, 0, n, out);
+}
+
+namespace {
+
+inline int32_t i8_dot_scalar(const int8_t* a, const int8_t* b, int n) {
+  int32_t total = 0;
+  for (int i = 0; i < n; ++i) {
+    const int32_t d = (int32_t)a[i] - (int32_t)b[i];
+    total += d * d;
+  }
+  return total;
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+#pragma GCC push_options
+#pragma GCC target("avx2")
+inline int32_t i8_dot_avx2(const int8_t* a, const int8_t* b, int n) {
+  __m256i acc = _mm256_setzero_si256();
+  int i = 0;
+  for (; i + 16 <= n; i += 16) {
+    const __m256i va = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i*)(a + i)));
+    const __m256i vb = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i*)(b + i)));
+    const __m256i d = _mm256_sub_epi16(va, vb);
+    acc = _mm256_add_epi32(acc, _mm256_madd_epi16(d, d));
+  }
+  __m128i s = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+  s = _mm_hadd_epi32(s, s);
+  s = _mm_hadd_epi32(s, s);
+  int32_t total = _mm_cvtsi128_si32(s);
+  for (; i < n; ++i) {
+    const int32_t d = (int32_t)a[i] - (int32_t)b[i];
+    total += d * d;
+  }
+  return total;
+}
+#pragma GCC pop_options
+#endif
+
+inline int32_t i8_dot(const int8_t* a, const int8_t* b, int n) {
+#if defined(__x86_64__) || defined(__i386__)
+  static const bool kAvx2 = __builtin_cpu_supports("avx2");
+  if (kAvx2) return i8_dot_avx2(a, b, n);
+#endif
+  return i8_dot_scalar(a, b, n);
+}
+
+}  // namespace
+
+bool Executor::ensure_qcache(Table& t) {
+  const int32_t vc = t.schema.find_vec();
+  if (vc < 0 || !t.cached) return false;
+  const int32_t dim = t.schema.cols[(size_t)vc].len;
+  if (dim <= 0 || dim > 8192) return false;
+  const size_t bytes = t.slots.size() * (size_t)dim;
+  // The copy costs one byte per float, i.e. a quarter of the cached row bytes.
+  // Keep it bounded so a huge table degrades to the plain scan instead of
+  // trading memory for the peak-RSS metric.
+  if (bytes > (size_t)32 * 1024 * 1024) return false;
+  if (t.q_valid && t.q_dim == dim && t.qvec.size() == bytes) return true;
+
+  t.qvec.assign(bytes, 0);
+  t.q_dim = dim;
+  t.qstep = 0.0f;
+  float max_abs = 0.0f;
+  for (const Slot& s : t.slots) {
+    if (s.dead() || s.vec_rel == kVecRelNone) continue;
+    const float* v = (const float*)(t.arena.data() + s.arena_off + s.vec_rel);
+    for (int32_t j = 0; j < dim; ++j) {
+      const float a = std::fabs(v[j]);
+      if (a > max_abs) max_abs = a;
+    }
+  }
+  if (!(max_abs > 0.0f)) return false;  // all-zero column: nothing to prune
+  // 100 units at the data maximum, so stored values stay inside [-100, 100]
+  // and keep a margin against the int8 range.
+  const float step = max_abs / 100.0f;
+  const float inv = 1.0f / step;
+  for (size_t i = 0; i < t.slots.size(); ++i) {
+    const Slot& s = t.slots[i];
+    if (s.dead() || s.vec_rel == kVecRelNone) continue;
+    const float* v = (const float*)(t.arena.data() + s.arena_off + s.vec_rel);
+    int8_t* z = t.qvec.data() + i * (size_t)dim;
+    for (int32_t j = 0; j < dim; ++j) {
+      int32_t q = (int32_t)lrintf(v[j] * inv);
+      if (q > 127) q = 127;
+      else if (q < -127) q = -127;
+      z[j] = (int8_t)q;
+    }
+  }
+  t.qstep = step;
+  t.q_valid = true;
+  return true;
+}
+
+bool Executor::scan_topk_i8(const ScanSpec& spec, std::vector<TopKHit>& out) {
+  static const bool kI8Debug = std::getenv("MVD_I8_STATS") != nullptr;
+  static const bool kI8Off = std::getenv("MVD_NO_I8") != nullptr;
+  if (kI8Off) return false;
+  const auto t_start = std::chrono::steady_clock::now();
+  const int dim = spec.dim;
+  const size_t k = spec.k;
+  // Filtered scans already visit few rows (equality index) or have to decode
+  // extra columns, so they keep the general path.
+  if (!spec.qvec || !spec.query || dim <= 0 || k == 0 || k > 1024) return false;
+  if (spec.cand || !spec.conds->empty()) return false;
+  const float step = spec.qstep;
+  if (!(step > 0.0f)) return false;
+
+  // Quantize the query on the same grid.  A query outside the stored range makes
+  // the bound unusable, so fall back instead of guessing.
+  const float qmax = 120.0f * step;
+  std::vector<int8_t> qq((size_t)dim);
+  for (int j = 0; j < dim; ++j) {
+    const float v = spec.query[j];
+    if (!(v <= qmax) || !(v >= -qmax)) return false;
+    qq[(size_t)j] = (int8_t)lrintf(v / step);
+  }
+
+  const std::vector<Slot>& slots = *spec.slots;
+  const char* arena = spec.arena;
+  const uint32_t n = (uint32_t)slots.size();
+  if (n == 0) {
+    out.clear();
+    return true;
+  }
+
+  size_t m = k * 4;
+  if (m < 32) m = 32;
+  if (m > 4096) m = 4096;
+
+  // Pass 1: one cheap fixed-point distance per row, keeping the m smallest.
+  static thread_local std::vector<int32_t> dq;
+  dq.assign(n, -1);
+  std::vector<std::pair<int32_t, uint32_t>> best;
+  best.reserve(m);
+  uint32_t live = 0;
+  for (uint32_t i = 0; i < n; ++i) {
+    const Slot& s = slots[i];
+    if (s.dead() || s.vec_rel == kVecRelNone) continue;
+    ++live;
+    const int32_t sq = i8_dot(spec.qvec + (size_t)i * (size_t)dim, qq.data(), dim);
+    dq[i] = sq;
+    const std::pair<int32_t, uint32_t> entry{sq, i};
+    if (best.size() < m) {
+      best.insert(std::lower_bound(best.begin(), best.end(), entry), entry);
+    } else if (sq < best.back().first) {
+      best.insert(std::lower_bound(best.begin(), best.end(), entry), entry);
+      best.pop_back();
+    }
+  }
+  if (live == 0) {
+    out.clear();
+    return true;
+  }
+
+  const auto t_p1 = std::chrono::steady_clock::now();
+  auto less = [](const TopKHit& a, const TopKHit& b) {
+    return a.d2 < b.d2 || (a.d2 == b.d2 && a.pk < b.pk);
+  };
+
+  // Pass 2: exact distances for those m rows give a real cutoff.
+  std::vector<TopKHit> exact;
+  exact.reserve(best.size());
+  for (const std::pair<int32_t, uint32_t>& pr : best) {
+    const Slot& s = slots[pr.second];
+    const float* v = (const float*)(arena + s.arena_off + s.vec_rel);
+    exact.push_back(TopKHit{l2_sq_double(v, spec.query, dim), s.pk, pr.second});
+  }
+  std::sort(exact.begin(), exact.end(), less);
+  if (live < m) {
+    // Every live row took part in the screen, so the sorted list is the answer.
+    out = std::move(exact);
+    if (out.size() > k) out.resize(k);
+    return true;
+  }
+
+  // Rounding costs at most `step` per dimension, so a row whose quantized
+  // distance already clears the k-th exact distance by more than the bound
+  // cannot enter the answer.  dq is integral, so the floor loses nothing.
+  const double d_k = std::sqrt(exact[k - 1].d2);
+  const double bound = (double)step * std::sqrt((double)dim);
+  const double unit = (d_k + bound) / (double)step;
+  const double limit = unit * unit;
+  if (!(limit < 2.0e9)) return false;
+  const int32_t lim = (int32_t)limit;
+
+  // Pass 3: exact distances for the band that can still reach the top K.
+  out.clear();
+  for (uint32_t i = 0; i < n; ++i) {
+    const int32_t sq = dq[i];
+    if (sq < 0 || sq > lim) continue;
+    const Slot& s = slots[i];
+    const float* v = (const float*)(arena + s.arena_off + s.vec_rel);
+    out.push_back(TopKHit{l2_sq_double(v, spec.query, dim), s.pk, i});
+  }
+  if (out.size() > 4096) {
+    out.clear();
+    return false;  // pathological band: let the plain scan answer
+  }
+  if (kI8Debug) {
+    const auto t_end = std::chrono::steady_clock::now();
+    auto us = [](auto a, auto b) {
+      return (double)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count() / 1000.0;
+    };
+    std::fprintf(stderr, "i8: live=%u band=%zu p1=%.1fus p2p3=%.1fus total=%.1fus\n", live, out.size(),
+                 us(t_start, t_p1), us(t_p1, t_end), us(t_start, t_end));
+  }
+  std::sort(out.begin(), out.end(), less);
+  if (out.size() > k) out.resize(k);
+  return true;
 }
 
 bool Executor::scan_parallel(const ScanSpec& spec, uint32_t n, std::vector<TopKHit>& out) {
@@ -726,6 +941,14 @@ ResultSet Executor::exec_select(Stmt& stmt) {
     // against the row bytes, so a stale index entry can only cost time.
     if (conds.size() == 1 && conds[0].op == CmpOp::Eq) {
       spec.cand = store_.eq_candidates(t, conds[0].col, conds[0].lit);
+    }
+    // Screen on the fixed-point copy when it is available: the exact distance
+    // then runs on a handful of candidates instead of every row.  The copy is
+    // strided by the table's declared dimension, so only use it when the query
+    // agrees with that dimension.
+    if (ensure_qcache(t) && t.q_dim == spec.dim) {
+      spec.qvec = t.qvec.data();
+      spec.qstep = t.qstep;
     }
     std::vector<TopKHit> best;
     best.reserve(spec.k);

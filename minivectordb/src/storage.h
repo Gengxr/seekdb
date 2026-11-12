@@ -75,6 +75,14 @@ struct Table {
   };
   std::vector<EqIndex> eq;
 
+  // Fixed-point copy of the vector column (one int8 per dimension, slot-major).
+  // A query is screened against this copy first and only the survivors pay for
+  // the exact double distance.  Rebuilt lazily after any row change.
+  std::vector<int8_t> qvec;
+  float qstep = 0.0f;  // value of one int8 unit; |v| <= 100 * qstep for stored rows
+  bool q_valid = false;
+  int32_t q_dim = 0;
+
   int32_t vec_idx() const { return schema.find_vec(); }
 };
 

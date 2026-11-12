@@ -564,6 +564,7 @@ void Store::apply_put(Table& t, int64_t pk, const char* row, uint32_t len, uint3
   for (size_t c = 0; c < t.eq.size(); ++c) {
     if (t.eq[c].built && !t.eq[c].disabled) eq_index_add(t, t.eq[c], (int32_t)c, sid, row, len);
   }
+  t.q_valid = false;
 }
 
 const std::vector<uint32_t>* Store::eq_candidates(Table& t, int32_t col, const Value& lit) {
@@ -606,6 +607,7 @@ void Store::apply_delete(Table& t, int64_t pk) {
   t.live_bytes -= s.len();
   --t.live_rows;
   s.row_len |= kSlotDeadFlag;
+  t.q_valid = false;
 }
 
 void Store::replay_log() {
@@ -860,6 +862,7 @@ void Store::evict_arenas_if_needed() {
   size_t total = 0;
   for (auto& t : tables_) {
     if (t->cached) total += t->arena.size();
+    total += t->qvec.size();
   }
   while (total > cache_budget_) {
     Table* victim = nullptr;
@@ -873,6 +876,9 @@ void Store::evict_arenas_if_needed() {
     victim->arena.shrink_to_fit();
     victim->arena_live = 0;
     victim->arena_garbage = 0;
+    total -= victim->qvec.size();
+    std::vector<int8_t>().swap(victim->qvec);
+    victim->q_valid = false;
   }
 }
 
