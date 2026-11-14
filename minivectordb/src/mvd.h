@@ -137,7 +137,6 @@ struct SelectItem {
   bool star = false;
   bool is_distance = false;
   bool is_literal = false;   // constant projection, e.g. SELECT 1
-  bool is_count = false;     // COUNT(*), only valid with a FROM clause
   std::string col_name;      // plain column or the vector column of L2_DISTANCE
   std::vector<float> query;  // L2_DISTANCE query vector
   RawValue lit;              // literal for SELECT <literal>

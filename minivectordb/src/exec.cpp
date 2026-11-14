@@ -823,28 +823,6 @@ ResultSet Executor::exec_select(Stmt& stmt) {
   Table& t = store_.require_table(stmt.table);
   const Schema& schema = t.schema;
 
-  // COUNT(*): a driver-level health probe and the cheapest full-scan aggregate.
-  bool count_star = false;
-  for (const SelectItem& it : stmt.items) count_star = count_star || it.is_count;
-  if (count_star) {
-    if (stmt.items.size() != 1) {
-      fail(ErrCode::UnsupportedSql, "COUNT(*) cannot be combined with other select items");
-    }
-    if (stmt.order_is_distance || !stmt.order_name.empty() || stmt.order_position > 0 || stmt.has_limit) {
-      fail(ErrCode::UnsupportedSql, "COUNT(*) does not support ORDER BY or LIMIT");
-    }
-    std::vector<CondPlan> count_conds;
-    resolve_conditions(schema, stmt.where, count_conds);
-    std::vector<RowRef> matched = collect_matching(t, count_conds);
-    ResultSet rs;
-    rs.query = true;
-    rs.columns.push_back(stmt.items[0].alias.empty() ? "COUNT(*)" : stmt.items[0].alias);
-    std::vector<Cell> row;
-    row.push_back(Cell::big((int64_t)matched.size()));
-    rs.rows.push_back(std::move(row));
-    return rs;
-  }
-
   std::vector<ItemPlan> items;
   items.reserve(stmt.items.size());
   for (const SelectItem& it : stmt.items) {
