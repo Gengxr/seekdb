@@ -671,7 +671,19 @@ class Parser {
         parse_optional_alias(it);
       } else if (cur().kind == Token::Ident) {
         std::string fn = to_lower(cur().text);
-        if (fn == "l2_distance") {
+        if (fn == "count") {
+          advance();
+          if (is_punct('(')) {
+            advance();
+            expect_punct('*');
+            expect_punct(')');
+            it.is_count = true;
+            parse_optional_alias(it);
+          } else {
+            it.col_name = "count";
+            parse_optional_alias(it);
+          }
+        } else if (fn == "l2_distance") {
           advance();
           it.is_distance = true;
           expect_punct('(');
