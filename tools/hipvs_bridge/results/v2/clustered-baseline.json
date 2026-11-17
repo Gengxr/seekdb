@@ -1,0 +1,22 @@
+{
+  "library": "./libbaseline.so",
+  "rows": 250000,
+  "dim": 256,
+  "nq": 1000,
+  "seed": 917,
+  "distribution": "clustered",
+  "build_s": 19.651469383388758,
+  "build_snapshot_reload_first_query_s": 20.430872535333037,
+  "10": {
+    "qps": 377.53787374164256,
+    "p95_ms": 2.7826732955873013,
+    "recall": 0.9997
+  },
+  "100": {
+    "qps": 348.27998681586655,
+    "p95_ms": 3.0622005462646484,
+    "recall": 0.99994
+  },
+  "device_vram_peak_bytes": 1057591296,
+  "process_peak_rss_kib": "2119144"
+}

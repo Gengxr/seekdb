@@ -1,0 +1,4 @@
+persistent=0 qps=461.601 reference_overlap=1.000000
+persistent=1 qps=1406.214 reference_overlap=1.000000
+persistent=1 qps=1390.625 reference_overlap=1.000000
+persistent=0 qps=467.606 reference_overlap=1.000000

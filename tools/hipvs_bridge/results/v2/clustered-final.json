@@ -1,0 +1,22 @@
+{
+  "library": "./libfinal.so",
+  "rows": 250000,
+  "dim": 256,
+  "nq": 1000,
+  "seed": 917,
+  "distribution": "clustered",
+  "build_s": 6.022891456261277,
+  "build_snapshot_reload_first_query_s": 6.785389928147197,
+  "10": {
+    "qps": 1365.88511179158,
+    "p95_ms": 0.7460994645953178,
+    "recall": 0.9997
+  },
+  "100": {
+    "qps": 1357.5997145775798,
+    "p95_ms": 0.7526257075369358,
+    "recall": 0.99994
+  },
+  "device_vram_peak_bytes": 1054707712,
+  "process_peak_rss_kib": "1679824"
+}

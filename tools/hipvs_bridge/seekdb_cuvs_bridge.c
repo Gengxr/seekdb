@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <omp.h>
 
 typedef struct {
   cuvsResources_t        res;
@@ -57,10 +58,17 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  h->ip->intermediate_graph_degree = 160;
+  h->ip->nn_descent_niter = 30;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
-  if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
+  {
+    // Bound the library OpenMP team without changing the caller thread setting.
+    const int previous_threads = omp_get_max_threads();
+    if (previous_threads > 24) omp_set_num_threads(24);
+    const cuvsError_t status = cuvsCagraBuild(h->res, h->ip, &dset, h->idx);
+    omp_set_num_threads(previous_threads);
+    if (status != CUVS_SUCCESS) goto fail_idx;
+  }
   h->n = n; h->dim = dim;
   return h;
 
@@ -97,9 +105,10 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     sp = h->search_params;
     {
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
+      if (required_itopk < 1024) required_itopk = 1024;
       sp->itopk_size = required_itopk;
       sp->search_width = 4;
+      sp->algo = MULTI_CTA;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }

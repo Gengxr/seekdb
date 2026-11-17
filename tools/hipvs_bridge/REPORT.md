@@ -1,43 +1,66 @@
-# V5 GPU scratch-buffer reuse: development submission
+# V5 fast GPU build and persistent query worker
 
-Base: `634888d9b037153fa143d2c913ba4b25503e1d62`.
-
-This is an initial, tested bridge optimization, **not a completed build-speedup submission**. No official score, CPU/GPU build comparison, or 250K end-to-end speedup is claimed.
+Frozen base: `634888d9b037153fa143d2c913ba4b25503e1d62`.
+Previous submission: `66dd74286271e55c8cc7a967b66e257194e64d51`.
+The user reported the previous official result as `build=1.086x, query=1.008x, gates=pass`, score 5.087. That result does not apply to this revision.
 
 ## Implementation
 
-The bridge retains query, ID and distance device buffers per index, grows them only when necessary, and releases them with the index. Search parameters are retained and reset for each requested k. A per-index mutex serializes search and snapshot serialization. Different index handles do not share buffers. New handles and deserialized snapshots start with empty buffers; no previous-run graph or cache is reused. Invalid sizes and distance-copy failures return errors.
+* Keep final graph degree 128; use intermediate degree 160 and 30 NN-descent iterations.
+* Use the fixed hipVS library's MULTI_CTA CAGRA search, itopk >= 1024 and search width 4. Broader search compensates for cheaper construction. The installed SINGLE_CTA implementation rejects itopk > 512; changing the search mode is essential.
+* Reuse one synchronous 32 MiB-stack GPU worker across build, search and snapshot jobs. Callers retain arguments until completion; submissions are serialized; recursive calls execute on the same worker. Shutdown joins the worker. This avoids recreating pthread and HIP thread-local state on each SQL query.
+* Retain the previous per-index device buffers, mutex and search-parameter reuse.
+* Limit build OpenMP teams to 24 and restore the caller's previous setting afterward. The build script uses ROCm's OpenMP runtime through `-fopenmp`.
 
-NN-descent iterations (100), graph degrees (128/256), FP32 data, search width (4) and minimum itopk (512) remain unchanged. The official hipVS search implementation remains in use. No changes are made to the CPU VSAG path or SQL interface. Destruction requires callers to finish all operations first, as documented in the header.
+The same implementation applies to all inputs and stages. FP32 vectors, IDs and SQL semantics are unchanged. No previous-run graph cache is introduced. Search uses actual hipVS GPU CAGRA results. CPU VSAG code is untouched. CPU exact search appears only in the benchmark oracle.
 
-## Measured component results
+## Development results
 
-Environment: supplied AMD platform instance, gfx1100, ROCm 7.2.4, installed `/opt/hipvs`. Platform sample: 10,000 rows x 128 FP32, 100 queries. Each throughput measurement uses 4096 sequential calls; validation occurs outside the timed loop. These are direct bridge calls, **not SQL queries**. One candidate-then-baseline pair:
+Environment: supplied gfx1100 AMD instance, ROCm 7.2.4, 16-core CPU quota with 128 visible CPUs, about 55 GiB RAM quota. Both libraries run with `OMP_NUM_THREADS=24 OPENBLAS_NUM_THREADS=8`. Each library is measured in a fresh process with independent GPU initialization. Data generation precedes timing. The measured complete bridge time includes build, snapshot write, destruction, snapshot reload and first query.
 
-| Metric | Frozen bridge | Candidate |
-|---|---:|---:|
-| Top-10 queries/s | 377.282 | 380.434 |
-| Top-100 queries/s | 378.856 | 382.198 |
-| Recall@10 | 1.000 | 1.000 |
-| Recall@100 | 1.000 | 1.000 |
-| Build plus first query, seconds | 5.379 | 7.088 |
+**These are synthetic direct-bridge results, not SQL end-to-end or official SIFT250K/Hidden250K results.** SQL scanning, ID mapping and DDL overhead are excluded. Raw JSON is under `tools/hipvs_bridge/results/v2/`.
 
-The small throughput difference is not evidence of a statistically significant gain. The build algorithm is unchanged; this pair did not show a build improvement. Compilation of the bridge, snapshot write/read, rejection of incorrect snapshot dimensions, result ID uniqueness/range and L2 distance checks passed. Four-thread searches on a shared handle also passed. The test covers buffer growth, smaller subsequent requests, null distance output and invalid query counts.
+| 250K dataset | Baseline seconds | Candidate seconds | Speedup | Baseline Recall@10 / @100 | Candidate Recall@10 / @100 |
+|---|---:|---:|---:|---|---|
+| Normal, 128D, nq=4096 | 20.098 | 6.457 | 3.113x | .990601 / .966572 | .996802 / .989114 |
+| Normal, 256D, nq=4096 | 20.617 | 6.785 | 3.039x | .949561 / .899500 | .976074 / .950105 |
+| 64 clusters, 256D, nq=1000 | 20.431 | 6.785 | 3.011x | .999700 / .999940 | .999700 / .999940 |
+
+| nq=4096 | Baseline Top-10 / Top-100 QPS | Candidate Top-10 / Top-100 QPS | Baseline / candidate peak VRAM bytes |
+|---|---|---|---|
+| 128D | 306.37 / 292.55 | 1704.94 / 1687.67 | 929406976 / 926453760 |
+| 256D | 263.43 / 258.59 | 1588.37 / 1573.37 | 1057685504 / 1054654464 |
+
+VRAM is sampled from sysfs every 20 ms and can miss brief peaks. Peak process RSS stayed below 2.1 GiB. The weighted geometric bridge speedup is approximately 3.07x, **not a competition score or measured SQL speedup**.
+
+## Checks completed
+
+The final bridge compiles with the contest script on the supplied ROCm installation. Snapshot write/read and rejection of incorrect dimensions pass. The 10K platform sample achieves Recall@10/@100=1.0, including concurrent calls on one handle, varying batch sizes, buffer growth, null distance output and invalid query-count rejection. The 250K benchmark checks legal unique IDs, returned FP32 distances and recall against exact ground truth.
+
+`test_worker.cpp` checks 8 concurrent submitters, 8000 completed jobs, nested submission and repeated worker creation/destruction. GPU query ID sets match direct execution on the sample. Final measured fresh-thread QPS was 461.60/467.61 versus persistent-worker 1406.21/1390.63. This is a separate comparison and must not be multiplied into the table's gains.
+
+Rejected experiments include lowering iterations without compensating search quality and default IVF-PQ construction. Those variants are not shipped.
 
 ## Reproduce
 
-Compile the frozen bridge separately from the frozen commit using the contest build script. Compile this bridge using the same command:
+Compile the baseline bridge from the frozen commit separately; the platform's preinstalled bridge may be older. Compile candidate with the unchanged required invocation:
 
 ```bash
-HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm tools/hipvs_bridge/build.sh /absolute/path/libcandidate.so
-python tools/hipvs_bridge/bench_bridge.py /absolute/path/libcandidate.so candidate
-python tools/hipvs_bridge/bench_bridge.py /absolute/path/libbaseline.so baseline
+HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm tools/hipvs_bridge/build.sh /absolute/path/libseekdb_cuvs_bridge.so
+OMP_NUM_THREADS=24 OPENBLAS_NUM_THREADS=8 /opt/venv/bin/python tools/hipvs_bridge/benchmark_v2.py /absolute/path/libseekdb_cuvs_bridge.so --dim 256
+# Repeat with --dim 128, swapping baseline/candidate order.
+# Extra distribution: --dim 256 --nq 1000 --distribution clustered
 ```
 
-Python requires NumPy; it is available in the supplied platform's `/opt/venv/bin/python`. The script uses the platform sample files under `/seekdb_workspace/datasets`, computes exact FP32 ground truth on CPU solely for test validation, and saves returned IDs for inspection. It does not participate in seekdb execution or official evaluation. Repeat paired runs with reversed order before making performance claims.
+The Python script needs NumPy, included in the platform virtual environment. It generates deterministic data (seed 917 by default), computes exact truth in bounded blocks, performs 4096 individual queries for each k and prints JSON. No dependency is added to seekdb's production build.
 
-The existing `test_persistence.cpp` can be compiled against this bridge and run with `write` and `read` arguments. Ensure `LD_LIBRARY_PATH` resolves `libseekdb_cuvs_bridge.so` to the candidate, not the platform's preinstalled library.
+```bash
+g++ -std=c++17 -O2 -pthread -Isrc/oblib/lib/vector tools/hipvs_bridge/test_worker.cpp -L/absolute/path -lseekdb_cuvs_bridge -Wl,-rpath,/absolute/path -o /tmp/test_worker
+LD_LIBRARY_PATH=/absolute/path:/opt/hipvs/lib:/opt/rocm/lib /tmp/test_worker
+```
 
-## Outstanding validation and work
+The worker test uses the platform's `/seekdb_workspace/datasets` sample. Existing `test_persistence.cpp` remains usable with write/read modes. Ensure runtime resolution loads the candidate bridge.
 
-Full seekdb source compilation and SQL integration tests have not completed: full Git source download stalled on this instance. No CPU VSAG regression test, GPU profiler audit, peak VRAM measurement or official SIFT250K/Hidden250K paired run has been performed. These remain required before treating the branch as competition-ready. The retained scratch footprint is proportional to the largest query/result shapes seen by each live index and must be included in the VRAM audit. Primary CAGRA build optimization remains outstanding.
+## Remaining official verification
+
+Full seekdb compilation and SQL integration tests have not completed in this session because source downloads were unreliable. The bridge and standalone worker tests were compiled and run. CPU VSAG regression, official GPU profiler audit and paired SIFT250K/Hidden250K tests remain required. No 20-point score is claimed. Keep the previous passing submission as a rollback point until the platform confirms this revision's gates.
