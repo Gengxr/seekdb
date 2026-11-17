@@ -2,7 +2,6 @@
 #include "seekdb_cuvs_bridge.h"
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/cagra.h>
-#include <cuvs/neighbors/ivf_pq.h>
 #include <dlpack/dlpack.h>
 #ifdef __HIP_PLATFORM_AMD__
 #include <cuvs/cuda_runtime.h>
@@ -53,41 +52,24 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
-  /* Dimension-scaled graph build. Low-dim (SIFT-scale) data reaches the recall
-   * gate with the cuVS default degree pair, so use the cheaper NN-Descent graph
-   * (intermediate degree 128 vs 256 cuts the dominant per-iteration kNN work by
-   * ~4x). High-dim data needs a denser graph; build it with IVF-PQ plus exact
-   * refinement, which reaches comparable edge quality far faster than a
-   * degree-256 NN-Descent while keeping the output degree at 128. */
+  /* NN-Descent only: IVF-PQ exceeded the relative VRAM gate and lost Hidden
+   * recall@10. Low-dim (SIFT-scale) data passes the recall gate with the cuVS
+   * default degree pair, so use the cheaper intermediate degree 128 (vs 256),
+   * cutting the dominant per-iteration kNN work ~4x and reducing VRAM.
+   * High-dim data keeps output degree 128 for recall but trims the intermediate
+   * degree to 192, cutting kNN work and VRAM with negligible recall impact. */
+  h->ip->build_algo = NN_DESCENT;
+  h->ip->nn_descent_niter = 100;
   if (dim <= 128) {
-    h->ip->build_algo = NN_DESCENT;
     h->ip->graph_degree = 64;
     h->ip->intermediate_graph_degree = 128;
-    h->ip->nn_descent_niter = 100;
   } else {
-    h->ip->build_algo = IVF_PQ;
     h->ip->graph_degree = 128;
-    h->ip->intermediate_graph_degree = 256;
-    h->ip->nn_descent_niter = 100;
-    if (cuvsIvfPqIndexParamsCreate(&h->ip->graph_build_params->ivf_pq_build_params) != CUVS_SUCCESS) goto fail_ip;
-    if (cuvsIvfPqSearchParamsCreate(&h->ip->graph_build_params->ivf_pq_search_params) != CUVS_SUCCESS) goto fail_ip;
-    h->ip->graph_build_params->refinement_rate = 4.0f;
-    h->ip->graph_build_params->ivf_pq_search_params->n_probes = 96;
-    h->ip->graph_build_params->ivf_pq_build_params->pq_bits = 8;
+    h->ip->intermediate_graph_degree = 192;
   }
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   if (cuvsStreamSync(h->res) != CUVS_SUCCESS) goto fail_idx;
-  if (h->ip->graph_build_params) {
-    if (h->ip->graph_build_params->ivf_pq_build_params) {
-      cuvsIvfPqIndexParamsDestroy(h->ip->graph_build_params->ivf_pq_build_params);
-      h->ip->graph_build_params->ivf_pq_build_params = NULL;
-    }
-    if (h->ip->graph_build_params->ivf_pq_search_params) {
-      cuvsIvfPqSearchParamsDestroy(h->ip->graph_build_params->ivf_pq_search_params);
-      h->ip->graph_build_params->ivf_pq_search_params = NULL;
-    }
-  }
   h->n = n; h->dim = dim;
   fprintf(stderr, "[seekdb_cuvs] build n=%ld dim=%ld seconds=%.6f\n",
           n, dim, bridge_time_seconds() - started);
@@ -156,15 +138,8 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     {
       size_t required_itopk = (size_t)topk * 4;
       if (required_itopk < 512) required_itopk = 512;
-      sp->search_width = 4;
-      /* High-dim graphs are built with IVF-PQ; widen the Top-100 search to keep
-       * recall within the gate. Top-10 and low-dim searches stay narrow/fast. */
-      if (h->dim > 128 && topk > 64) {
-        required_itopk = (size_t)topk * 8;
-        if (required_itopk < 832) required_itopk = 832;
-        sp->search_width = 8;
-      }
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
+      sp->search_width = 4;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
