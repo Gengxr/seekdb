@@ -10,6 +10,7 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <omp.h>
@@ -58,8 +59,8 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 160;
-  h->ip->nn_descent_niter = 10;
+  h->ip->intermediate_graph_degree = 128;
+  h->ip->nn_descent_niter = 5;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   {
     // Bound the library OpenMP team without changing the caller thread setting.
@@ -105,7 +106,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     sp = h->search_params;
     {
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 1024) required_itopk = 1024;
+      if (required_itopk < 2048) required_itopk = 2048;
       sp->itopk_size = required_itopk;
       sp->search_width = 4;
       sp->algo = MULTI_CTA;
@@ -185,6 +186,35 @@ fail:
   pthread_mutex_destroy(&index->lock);
   free(index);
   return NULL;
+}
+
+int seekdb_cuvs_get_dataset(void* handle, float* out, long n, long dim)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  if (!h || !out || n <= 0 || dim <= 0 ||
+      (size_t)n > SIZE_MAX / sizeof(float) / (size_t)dim) return 1;
+  pthread_mutex_lock(&h->lock);
+  int rc = 0;
+  DLManagedTensor ds;
+  if (cuvsCagraIndexGetDataset(h->idx, &ds) != CUVS_SUCCESS) { rc = 1; goto done; }
+  if (ds.dl_tensor.ndim != 2 || ds.dl_tensor.shape[0] != n || ds.dl_tensor.shape[1] != dim ||
+      ds.dl_tensor.dtype.code != kDLFloat || ds.dl_tensor.dtype.bits != 32 ||
+      ds.dl_tensor.dtype.lanes != 1 ||
+      (ds.dl_tensor.strides != NULL &&
+       (ds.dl_tensor.strides[0] != dim || ds.dl_tensor.strides[1] != 1))) { rc = 2; goto done; }
+  {
+    const void* src = (const char*)ds.dl_tensor.data + ds.dl_tensor.byte_offset;
+    const size_t bytes = sizeof(float) * (size_t)n * (size_t)dim;
+    if (ds.dl_tensor.device.device_type == kDLCPU) {
+      memcpy(out, src, bytes);
+    } else if (cudaMemcpy(out, src, bytes, cudaMemcpyDefault) != cudaSuccess) {
+      rc = 3; goto done;
+    }
+  }
+done:
+  pthread_mutex_unlock(&h->lock);
+  if (rc) fprintf(stderr, "[seekdb_cuvs] get_dataset rc=%d: %s\n", rc, cuvsGetLastErrorText());
+  return rc;
 }
 
 int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,

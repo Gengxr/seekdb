@@ -56,6 +56,7 @@ extern "C" int   seekdb_cuvs_search(void *handle, const float *query, long nq, l
 extern "C" void  seekdb_cuvs_free(void *handle);
 extern "C" int seekdb_cuvs_serialize(void *handle, const char *filename);
 extern "C" void *seekdb_cuvs_deserialize(const char *filename, long n, long dim);
+extern "C" int seekdb_cuvs_get_dataset(void *handle, float *out, long n, long dim);
 #else
 // GPU backend not compiled in (OB_BUILD_CUVS=OFF): inert stubs so oblib links
 // without libseekdb_cuvs_bridge.so. ob_cuvs_enabled() is false, so these are
@@ -66,6 +67,7 @@ static int   seekdb_cuvs_search(void *, const float *, long, long, unsigned int 
 static void  seekdb_cuvs_free(void *) {}
 static int seekdb_cuvs_serialize(void *, const char *) { return -1; }
 static void *seekdb_cuvs_deserialize(const char *, long, long) { return nullptr; }
+static int seekdb_cuvs_get_dataset(void *, float *, long, long) { return -1; }
 #endif
 
 namespace oceanbase {
@@ -315,11 +317,21 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
   return true;
 }
 
-static const char OB_CUVS_SNAPSHOT_MAGIC[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '2'};
+static const char OB_CUVS_SNAPSHOT_MAGIC[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '3'};
 struct ObCuvsSnapshotFile {
-  FILE *file_ = ::tmpfile();
+  FILE *file_ = nullptr;
   char path_[64] = {};
   ObCuvsSnapshotFile() {
+    // tmpfs keeps the graph staging file in RAM; the serialized snapshot is
+    // still persisted through the caller's stream. Falls back to tmpfile().
+    char tmpl[] = "/dev/shm/obcuvs-XXXXXX";
+    const int fd = ::mkstemp(tmpl);
+    if (fd >= 0) {
+      ::unlink(tmpl);
+      file_ = ::fdopen(fd, "w+b");
+      if (file_ == nullptr) { ::close(fd); }
+    }
+    if (file_ == nullptr) { file_ = ::tmpfile(); }
     if (file_ != nullptr) {
       ::snprintf(path_, sizeof(path_), "/proc/self/fd/%d", ::fileno(file_));
     }
@@ -343,6 +355,14 @@ static void *ob_cuvs_snapshot_job(void *arg) {
 }
 static bool ob_cuvs_snapshot_big_stack(ObCuvsSnapshotJob &job) {
   return cuvs_run_on_worker(ob_cuvs_snapshot_job, &job) && job.rc_ == 0;
+}
+struct ObCuvsDatasetJob {
+  void *handle_; float *out_; long n_; long dim_; int rc_;
+};
+static void *ob_cuvs_dataset_job(void *arg) {
+  ObCuvsDatasetJob *job = static_cast<ObCuvsDatasetJob *>(arg);
+  job->rc_ = seekdb_cuvs_get_dataset(job->handle_, job->out_, job->n_, job->dim_);
+  return nullptr;
 }
 
 static bool ob_cuvs_write(std::ostream &out, const void *data, size_t bytes) {
@@ -412,13 +432,14 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
       !ob_cuvs_write(out, &dim32, sizeof(dim32)) ||
       !ob_cuvs_write(out, &reserved, sizeof(reserved)) ||
       !ob_cuvs_write(out, &n64, sizeof(n64)) ||
-      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
-      !ob_cuvs_write(out, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
+      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
     return true;
   }
-  std::vector<char> chunk(65536);
+  // The cuVS snapshot file already embeds the FP32 dataset; vectors are
+  // recovered from it on load instead of persisting a second copy here.
+  std::vector<char> chunk(1024 * 1024);
   uint64_t remaining = graph_bytes;
   while (remaining > 0) {
     const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
@@ -456,15 +477,13 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
     ObCuvsEntry *ent = new ObCuvsEntry();
     ent->dim_ = dim32;
     ent->buf_ids_.resize(n);
-    ent->buf_vecs_.resize(n * static_cast<size_t>(dim32));
-    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
-        !ob_cuvs_read(in, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
+    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t))) {
       delete ent;
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("[OBVSAG][cuVS] truncated snapshot payload", K(ret), KP(key), K(n64));
     } else {
       ObCuvsSnapshotFile graph;
-      std::vector<char> chunk(65536);
+      std::vector<char> chunk(1024 * 1024);
       uint64_t remaining = graph_bytes;
       while (graph.file_ != nullptr && remaining > 0) {
         const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
@@ -479,6 +498,16 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
         delete ent;
         ret = OB_ERR_VSAG_RETURN_ERROR;
         LOG_WARN("[OBVSAG][cuVS] failed to load CAGRA graph from snapshot", K(ret), KP(key), K(n64));
+        return ret;
+      }
+      ent->buf_vecs_.resize(n * static_cast<size_t>(dim32));
+      ObCuvsDatasetJob dataset_job{job.handle_, ent->buf_vecs_.data(),
+                                   static_cast<long>(n), dim32, -1};
+      if (!cuvs_run_on_worker(ob_cuvs_dataset_job, &dataset_job) || dataset_job.rc_ != 0) {
+        seekdb_cuvs_free(job.handle_);
+        delete ent;
+        ret = OB_ERR_VSAG_RETURN_ERROR;
+        LOG_WARN("[OBVSAG][cuVS] failed to recover dataset from snapshot", K(ret), KP(key), K(n64));
         return ret;
       }
       ent->bridge_ = ob_cuvs_wrap(job.handle_);

@@ -28,6 +28,10 @@ int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
 void  seekdb_cuvs_free(void* handle);
 int seekdb_cuvs_serialize(void* handle, const char* filename);
 void* seekdb_cuvs_deserialize(const char* filename, long n, long dim);
+/* Copies the index's stored dataset (n x dim, row-major f32) into out.
+ * Returns 0 on success. Used to recover vectors from a loaded snapshot
+ * instead of persisting a second copy alongside the graph. */
+int seekdb_cuvs_get_dataset(void* handle, float* out, long n, long dim);
 #ifdef __cplusplus
 }
 #endif
