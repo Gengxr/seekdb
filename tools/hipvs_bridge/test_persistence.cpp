@@ -31,6 +31,10 @@ int main(int argc, char **argv)
     if (!index) return 4;
   }
   unsigned int ids[10];
+  std::vector<float> restored(vectors.size());
+  if (seekdb_cuvs_copy_dataset(index, restored.data(), count, dimension) != 0 ||
+      std::memcmp(restored.data(), vectors.data(), vectors.size() * sizeof(float)) != 0) return 16;
+  if (seekdb_cuvs_copy_dataset(index, restored.data(), count - 1, dimension) == 0) return 17;
   float distances[10];
   int result = seekdb_cuvs_search(index, vectors.data(), 1, 10, ids, distances);
   if (result != 0 || ids[0] != 0 || std::fabs(distances[0]) > 0.0001f) return 5;

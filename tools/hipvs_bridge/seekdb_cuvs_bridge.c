@@ -213,6 +213,41 @@ fail:
   return NULL;
 }
 
+int seekdb_cuvs_copy_dataset(void* handle, float* out, long n, long dim)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  if (!h || !out || n != h->n || dim != h->dim || n <= 0 || dim <= 0 ||
+      (size_t)n > SIZE_MAX / sizeof(float) / (size_t)dim) return 1;
+  pthread_mutex_lock(&h->search_mutex);
+  DLManagedTensor view = {0};
+  int rc = 1;
+  if (cuvsStreamSync(h->res) == CUVS_SUCCESS &&
+      cuvsCagraIndexGetDataset(h->idx, &view) == CUVS_SUCCESS) {
+    const DLTensor* t = &view.dl_tensor;
+    if (t->data && t->ndim == 2 && t->shape && t->shape[0] == n && t->shape[1] == dim &&
+        t->dtype.code == kDLFloat && t->dtype.bits == 32 && t->dtype.lanes == 1 &&
+        (!t->strides || (t->strides[0] >= dim && t->strides[1] == 1))) {
+      const size_t stride = t->strides ? (size_t)t->strides[0] : (size_t)dim;
+      if (stride <= SIZE_MAX / sizeof(float) / (size_t)n) {
+        const float* src = (const float*)((const char*)t->data + t->byte_offset);
+        const size_t row_bytes = sizeof(float) * (size_t)dim;
+        rc = 0;
+        if (stride == (size_t)dim) {
+          if (cudaMemcpy(out, src, row_bytes * (size_t)n, cudaMemcpyDefault) != cudaSuccess) rc = 1;
+        } else {
+          for (size_t row = 0; row < (size_t)n && rc == 0; ++row) {
+            if (cudaMemcpy(out + row * dim, src + row * stride, row_bytes,
+                           cudaMemcpyDefault) != cudaSuccess) rc = 1;
+          }
+        }
+      }
+    }
+  }
+  if (view.deleter) view.deleter(&view);
+  pthread_mutex_unlock(&h->search_mutex);
+  return rc;
+}
+
 int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
                           const float* query, long nq, long topk,
                           unsigned int* out_ids)
