@@ -12,6 +12,14 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <time.h>
+
+static double bridge_time_seconds(void)
+{
+  struct timespec ts = {0};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 
 typedef struct {
   cuvsResources_t        res;
@@ -26,6 +34,7 @@ typedef struct {
 
 void* seekdb_cuvs_build(const float* base, long n, long dim)
 {
+  const double started = bridge_time_seconds();
   if (!base || n <= 0 || dim <= 0 ||
       (size_t)n > SIZE_MAX / sizeof(float) / (size_t)dim) return NULL;
   sk_cuvs_index* h = (sk_cuvs_index*)calloc(1, sizeof(*h));
@@ -51,6 +60,8 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   if (cuvsStreamSync(h->res) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
+  fprintf(stderr, "[seekdb_cuvs] build n=%ld dim=%ld seconds=%.6f\n",
+          n, dim, bridge_time_seconds() - started);
   return h;
 
 fail_idx: cuvsCagraIndexDestroy(h->idx);

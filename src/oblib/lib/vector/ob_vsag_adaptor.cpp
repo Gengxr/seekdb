@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX LIB
 
 #include "ob_vsag_adaptor.h"
+#include "cuvs_worker.h"
 #include <map>
 #include <set>
 #include <mutex>
@@ -86,6 +87,8 @@ struct ObCuvsEntry {
   std::vector<float> buf_vecs_; // accumulated vectors (row-major) from add_index
   std::vector<int64_t> buf_ids_;// accumulated external vids from add_index
   size_t built_n_ = 0;          // #vectors present when cuVS was last (re)built
+  size_t bounds_n_ = 0;
+  int64_t min_vid_ = 0, max_vid_ = 0;
   bool vsag_ready_ = false;     // CPU fallback is built only when it is needed
 };
 static std::mutex g_ob_cuvs_mu;
@@ -135,6 +138,10 @@ static std::shared_ptr<void> ob_cuvs_wrap(void *handle) {
   if (handle == nullptr) { return std::shared_ptr<void>(); }
   return std::shared_ptr<void>(handle, [](void *h) { seekdb_cuvs_free(h); });
 }
+static CuvsWorker &ob_cuvs_worker() {
+  static CuvsWorker worker;
+  return worker;
+}
 struct ObCuvsBuildJob {
   const float *base; long n; long dim; void *out;
 };
@@ -146,10 +153,7 @@ static void *ob_cuvs_build_job(void *arg) {
 // cuVS overflows the small OB worker/DDL stack, so builds run on a 32MB pthread.
 static std::shared_ptr<void> ob_cuvs_build_big_stack(const float *base, long n, long dim) {
   ObCuvsBuildJob job{base, n, dim, nullptr};
-  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (pthread_create(&tid, &attr, ob_cuvs_build_job, &job) == 0) { pthread_join(tid, nullptr); }
-  pthread_attr_destroy(&attr);
+  ob_cuvs_worker().run(ob_cuvs_build_job, &job);
   return ob_cuvs_wrap(job.out);
 }
 static void ob_cuvs_register(void *key, const float *vectors, const int64_t *ids,
@@ -283,10 +287,7 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
   std::vector<unsigned> off(topk);
   std::vector<float> dst(topk);
   ObCuvsJob job{ent, query, topk, static_cast<int>(ent->dim_), n, need_build, &off, &dst, -1, false};
-  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (pthread_create(&tid, &attr, ob_cuvs_job, &job) == 0) { pthread_join(tid, nullptr); }
-  pthread_attr_destroy(&attr);
+  ob_cuvs_worker().run(ob_cuvs_job, &job);
   if (job.built_) { ob_vsag_trace("cuvs_build", key, static_cast<long>(ent->dim_), static_cast<long>(n)); }
   if (ent->bridge_ == nullptr || job.rc_ != 0) { return false; }
   // Post-filter: cuVS returned UNFILTERED top-k. Apply the query's row filter
@@ -347,13 +348,7 @@ static void *ob_cuvs_snapshot_job(void *arg) {
   return nullptr;
 }
 static bool ob_cuvs_snapshot_big_stack(ObCuvsSnapshotJob &job) {
-  pthread_t thread;
-  pthread_attr_t attr;
-  if (pthread_attr_init(&attr) != 0) { return false; }
-  int rc = pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (rc == 0) { rc = pthread_create(&thread, &attr, ob_cuvs_snapshot_job, &job); }
-  pthread_attr_destroy(&attr);
-  return rc == 0 && pthread_join(thread, nullptr) == 0 && job.rc_ == 0;
+  return ob_cuvs_worker().run(ob_cuvs_snapshot_job, &job) && job.rc_ == 0;
 }
 
 static bool ob_cuvs_write(std::ostream &out, const void *data, size_t bytes) {
@@ -852,9 +847,18 @@ int HnswIndexHandler::get_vid_bound(int64_t &min_vid, int64_t &max_vid)
     std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
     auto it = g_ob_cuvs_reg.find(this);
     if (it != g_ob_cuvs_reg.end() && !it->second->buf_ids_.empty()) {
-      const std::vector<int64_t> &vids = it->second->buf_ids_;
-      min_vid = *std::min_element(vids.begin(), vids.end());
-      max_vid = *std::max_element(vids.begin(), vids.end());
+      ObCuvsEntry &ent = *it->second;
+      const std::vector<int64_t> &vids = ent.buf_ids_;
+      // Entries are append-only; replacement/deserialization creates a new entry.
+      // Scan only IDs appended since the last bound request, never every query.
+      if (ent.bounds_n_ == 0) { ent.min_vid_ = ent.max_vid_ = vids[0]; }
+      for (size_t i = ent.bounds_n_; i < vids.size(); ++i) {
+        ent.min_vid_ = std::min(ent.min_vid_, vids[i]);
+        ent.max_vid_ = std::max(ent.max_vid_, vids[i]);
+      }
+      ent.bounds_n_ = vids.size();
+      min_vid = ent.min_vid_;
+      max_vid = ent.max_vid_;
     }
     return ret;
   }
@@ -2086,10 +2090,7 @@ long cuvs_knn_search_batch(void *key, const float *queries, long nq, long topk,
   std::vector<float> dst(static_cast<size_t>(nq) * topk);
   ObCuvsBatchJob job{ent, queries, nq, topk, n, need_build,
                      off.data(), dst.data(), 0, false};
-  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (pthread_create(&tid, &attr, ob_cuvs_batch_job, &job) == 0) { pthread_join(tid, nullptr); }
-  pthread_attr_destroy(&attr);
+  ob_cuvs_worker().run(ob_cuvs_batch_job, &job);
   if (job.built_) { ob_vsag_trace("cuvs_batch_build", key, static_cast<long>(ent->dim_), static_cast<long>(n)); }
   if (job.served_ != nq) { return 0; }
   for (long q = 0; q < nq; ++q) {
@@ -2116,10 +2117,7 @@ long cuvs_batch_knn(const float *base, long n, long dim,
   if (base == nullptr || query == nullptr || out_ids == nullptr ||
       out_dist == nullptr || n <= 0 || dim <= 0 || nq <= 0 || topk <= 0) { return 0; }
   ObCuvsRawBatchJob job{base, n, dim, query, nq, topk, out_ids, out_dist, 0};
-  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (pthread_create(&tid, &attr, ob_cuvs_raw_batch_job, &job) == 0) { pthread_join(tid, nullptr); }
-  pthread_attr_destroy(&attr);
+  ob_cuvs_worker().run(ob_cuvs_raw_batch_job, &job);
   ob_vsag_trace("cuvs_raw_batch", base, nq, topk);
   return job.served_;
 }
