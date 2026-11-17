@@ -24,6 +24,8 @@ typedef struct {
   float *query_buffer, *distance_buffer;
   unsigned int *id_buffer;
   size_t query_bytes, id_bytes, distance_bytes;
+  float *owned_dataset;
+  cuvsCagraIndex_t graph_owner;
 } sk_cuvs_index;
 
 /* Grow only when needed. Drop the old allocation first to bound peak VRAM. */
@@ -131,6 +133,8 @@ void seekdb_cuvs_free(void* handle)
   if (h->search_params) cuvsCagraSearchParamsDestroy(h->search_params);
   pthread_mutex_destroy(&h->lock);
   cuvsCagraIndexDestroy(h->idx);
+  if (h->graph_owner) cuvsCagraIndexDestroy(h->graph_owner);
+  if (h->owned_dataset) cuvsRMMFree(h->res, h->owned_dataset, sizeof(float)*h->n*h->dim);
   cuvsCagraIndexParamsDestroy(h->ip);
   cuvsResourcesDestroy(h->res);
   free(h);
@@ -184,6 +188,71 @@ fail:
   fprintf(stderr, "[seekdb_cuvs] deserialize failed: %s\n", cuvsGetLastErrorText());
   pthread_mutex_destroy(&index->lock);
   free(index);
+  return NULL;
+}
+
+/* Graph-only snapshots pair with the FP32 vectors in seekdb's outer snapshot.
+ * The legacy full-snapshot ABI above remains available for older snapshots. */
+int seekdb_cuvs_serialize_graph(void* handle, const char* filename)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  if (!h || !filename) return 1;
+  pthread_mutex_lock(&h->lock);
+  const cuvsError_t status = cuvsCagraSerialize(h->res, filename, h->idx, false);
+  pthread_mutex_unlock(&h->lock);
+  return status == CUVS_SUCCESS ? 0 : 1;
+}
+
+void* seekdb_cuvs_deserialize_graph(const char* filename, long n, long dim,
+                                   const float* base)
+{
+  if (!filename || !base || n <= 0 || dim <= 0 ||
+      (size_t)n > SIZE_MAX / sizeof(float) / (size_t)dim) return NULL;
+  sk_cuvs_index* h = (sk_cuvs_index*)calloc(1, sizeof(*h));
+  if (!h) return NULL;
+  cuvsCagraIndex_t staging = NULL;
+  DLManagedTensor graph = {}, dataset = {};
+  int64_t shape[2] = {n, dim};
+  if (pthread_mutex_init(&h->lock, NULL) != 0) { free(h); return NULL; }
+  if (cuvsResourcesCreate(&h->res) != CUVS_SUCCESS) goto fail;
+  if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
+  if (cuvsCagraIndexCreate(&h->idx) != CUVS_SUCCESS) goto fail_ip;
+  if (cuvsCagraIndexCreate(&staging) != CUVS_SUCCESS) goto fail_idx;
+  if (cuvsCagraDeserialize(h->res, filename, staging) != CUVS_SUCCESS) goto fail_staging;
+  if (cuvsCagraIndexGetGraph(staging, &graph) != CUVS_SUCCESS) goto fail_staging;
+  if (graph.dl_tensor.ndim != 2 || graph.dl_tensor.shape[0] != n ||
+      graph.dl_tensor.shape[1] <= 0) goto fail_graph;
+  if (cuvsRMMAlloc(h->res, (void**)&h->owned_dataset, sizeof(float)*n*dim) != CUVS_SUCCESS) goto fail_graph;
+  if (cudaMemcpy(h->owned_dataset, base, sizeof(float)*n*dim, cudaMemcpyDefault) != cudaSuccess) goto fail_graph;
+  dataset.dl_tensor.data = h->owned_dataset;
+  dataset.dl_tensor.device.device_type = kDLCUDA;
+  dataset.dl_tensor.ndim = 2;
+  dataset.dl_tensor.dtype.code = kDLFloat;
+  dataset.dl_tensor.dtype.bits = 32;
+  dataset.dl_tensor.dtype.lanes = 1;
+  dataset.dl_tensor.shape = shape;
+  if (cuvsCagraIndexFromArgs(h->res, L2Expanded, &graph, &dataset, h->idx) != CUVS_SUCCESS)
+    goto fail_graph;
+  // FromArgs can enqueue device copies; staging must remain alive until done.
+  if (cudaDeviceSynchronize() != cudaSuccess) goto fail_graph;
+  if (graph.deleter) graph.deleter(&graph);
+  h->graph_owner = staging;
+  h->n = n; h->dim = dim;
+  return h;
+fail_graph:
+  if (h->owned_dataset) cuvsRMMFree(h->res, h->owned_dataset, sizeof(float)*n*dim);
+  if (graph.deleter) graph.deleter(&graph);
+fail_staging:
+  cuvsCagraIndexDestroy(staging);
+fail_idx:
+  cuvsCagraIndexDestroy(h->idx);
+fail_ip:
+  cuvsCagraIndexParamsDestroy(h->ip);
+fail_res:
+  cuvsResourcesDestroy(h->res);
+fail:
+  pthread_mutex_destroy(&h->lock);
+  free(h);
   return NULL;
 }
 
