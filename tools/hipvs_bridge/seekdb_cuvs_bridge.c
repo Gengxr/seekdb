@@ -59,7 +59,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 160;
-  h->ip->nn_descent_niter = 10;
+  h->ip->nn_descent_niter = 5;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   {
     // Bound the library OpenMP team without changing the caller thread setting.
