@@ -905,12 +905,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
   // ------------------------- fast path: vector TopK in one pass
   // limit == 0 stays on the general path: it answers with an empty result set,
   // while a zero-length accumulator has no last entry to compare against.
-  // The general path can resolve a primary-key equality with one lookup.
-  // Building a secondary posting list or scanning tiles would touch more rows.
-  if (use_heap && limit > 0 && t.cached && store_.overlay_for(t)->rows.empty() &&
-      std::none_of(conds.begin(), conds.end(), [&](const CondPlan& c) {
-        return c.col == schema.pk_idx && c.op == CmpOp::Eq;
-      })) {
+  if (use_heap && limit > 0 && t.cached && store_.overlay_for(t)->rows.empty()) {
     const std::vector<float>& q = items[order_item].query;
     ScanSpec spec;
     spec.arena = t.arena.data();

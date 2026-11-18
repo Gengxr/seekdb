@@ -568,7 +568,7 @@ void Store::apply_put(Table& t, int64_t pk, const char* row, uint32_t len, uint3
     if (t.eq[c].built && !t.eq[c].disabled) eq_index_add(t, t.eq[c], (int32_t)c, sid, row, len);
   }
   t.q_valid = false;
-  t.packed.update_slot(t, sid);
+  t.packed.invalidate();
 }
 
 const std::vector<uint32_t>* Store::eq_candidates(Table& t, int32_t col, const Value& lit) {
@@ -612,7 +612,7 @@ void Store::apply_delete(Table& t, int64_t pk) {
   --t.live_rows;
   s.row_len |= kSlotDeadFlag;
   t.q_valid = false;
-  t.packed.update_slot(t, sid);
+  t.packed.invalidate();
 }
 
 void Store::replay_log() {
