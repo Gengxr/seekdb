@@ -78,7 +78,7 @@
     {
       "role": "tool",
       "method": "按学生提出的行存/列存与向量布局问题，分别记录写入时和已关闭进程重新打开后的内存。120000 行、每行 128 维、缓存预算 16 MiB，核对最后一个主键与重启后 Top5。",
-      "output": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 3.88s, data 65.6 MB, peak rss 29.2 MB, cache budget 16 MB\nrestart: first query 0.3 ms, vector top5 10.1 ms, peak rss 19.5 MB\nresult rows: [[107986, 6.634212207], [81424, 6.672901378], [22758, 6.799585715], [17980, 6.803626502], [62247, 6.823173779]]"
+      "output": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 3.31s, data 65.6 MB, peak rss 29.8 MB, cache budget 16 MB\nrestart: first query 0.1 ms, vector top5 9.9 ms, peak rss 19.5 MB\nresult rows: [[107986, 6.634212207], [81424, 6.672901378], [22758, 6.799585715], [17980, 6.803626502], [62247, 6.823173779]]"
     },
     {
       "role": "tool",
@@ -98,7 +98,7 @@
     {
       "role": "tool",
       "method": "同一批次、JSONL 串行往返、每个数据集 10000 条 128 维记录和 1000 条 Top10。三组种子各交错执行两轮，一半查询带过滤，查询含近邻扰动及独立随机向量。逐条核对 ID 顺序、距离，再比较各轮输出摘要。",
-      "output": "每版 6 轮，查询耗时中位数 89.67 → 25.02 ms；批写中位数 123.57 → 106.12 ms；首次查询 2.89 → 1.60 ms。每组种子两个版本返回的有序应答摘要一致。\n迁移到单行更新后立即查询的负载。每种情况做 6 次不同的行更新，只计更新后连续读的全过程，独立全量排序逐条核对。较早的两个阶段版本的中位数分别为 1 读 5.21 → 0.98 ms，4 读 5.24 → 1.03 ms，16 读 5.62 → 3.02 ms，128 读 9.88 → 5.47 ms。\n对量化网格内的单行变动，比较使整表索引失效（f22c8b1）和只重写该行（2601f4d）。计入 UPDATE 持久化和紧随其后的读取，对每个种子做 6 次更新，再取四种子的中位数：1 读 1.72 → 0.73 ms，4 读 2.86 → 1.96 ms，16 读 3.50 → 3.23 ms，128 读 7.29 → 8.37 ms。128 读的组合耗时增加。每条查询均与独立全量排序一致。"
+      "output": "每版 6 轮，查询耗时中位数 162.35 → 24.33 ms；批写中位数 125.13 → 97.76 ms；首次查询 2.99 → 1.69 ms。每组种子两个版本返回的有序应答摘要一致。\n迁移到单行更新后立即查询的负载。每种情况做 6 次不同的行更新，只计更新后连续读的全过程，独立全量排序逐条核对。较早的两个阶段版本的中位数分别为 1 读 5.21 → 0.98 ms，4 读 5.24 → 1.03 ms，16 读 5.62 → 3.02 ms，128 读 9.88 → 5.47 ms。\n对量化网格内的单行变动，比较使整表索引失效（f22c8b1）和只重写该行（2601f4d）。计入 UPDATE 持久化和紧随其后的读取，对每个种子做 6 次更新，再取四种子的中位数：1 读 1.72 → 0.73 ms，4 读 2.86 → 1.96 ms，16 读 3.50 → 3.23 ms，128 读 7.29 → 8.37 ms。128 读的组合耗时增加。每条查询均与独立全量排序一致。"
     },
     {
       "role": "tool",
@@ -138,7 +138,7 @@
       ],
       "result_evidence": {
         "pointer": "/experiments/0/output",
-        "quote": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 3.88s, data 65.6 MB, peak rss 29.2 MB, cache budget 16 MB\nrestart: first que"
+        "quote": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 3.31s, data 65.6 MB, peak rss 29.8 MB, cache budget 16 MB\nrestart: first que"
       },
       "agent_analysis": "向量和标量位于同一条持久化记录，超过行缓存预算的表保留行偏移。恢复改用分段读取，在记录完整并通过 CRC 后应用事务。两版重启后返回的五个 ID 和距离一致。16 MiB 是行缓存预算，官方还会计入容器页缓存。"
     },
@@ -210,7 +210,7 @@
       ],
       "result_evidence": {
         "pointer": "/experiments/4/output",
-        "quote": "每版 6 轮，查询耗时中位数 89.67 → 25.02 ms；批写中位数 123.57 → 106.12 ms；首次查询 2.89 → 1.60 ms。每组种子两个版本返回的有序应答摘要一致。"
+        "quote": "每版 6 轮，查询耗时中位数 162.35 → 24.33 ms；批写中位数 125.13 → 97.76 ms；首次查询 2.99 → 1.69 ms。每组种子两个版本返回的有序应答摘要一致。"
       },
       "agent_analysis": "保留学生选择的粗筛方向，Agent 把向量按 32 行分块，整数距离只用于给出保守候选；按量化残差的三角不等式扩大半径，最后以原 float32 向量计算 double 距离并按主键打破并列。首次建索引有成本。"
     },
@@ -310,11 +310,11 @@
   ],
   "version_check": {
     "role": "tool",
-    "source_commit": "f22c8b13faa4fa9491041fc662e09e908e17571f",
+    "source_commit": "2601f4de927271f06157cc9d4ffb0be10515bdc8",
     "method": "在独立 Ubuntu 24.04 环境由仓库 Dockerfile 构建 amd64 镜像，用官方判题器的容器入口逐项运行公开用例。对比镜像内二进制与源码干净重建的 SHA-256。",
     "passed_public_cases": 20,
-    "binary_sha256": "786937115f1bb78c7038c398d27e6983ecbd716911607fd2e299bf94dc145e3d",
-    "image_id": "sha256:c638fd38f2508c39a22427f3f26bea5de3e91ecb6002cf943ed110b7f2bbb406",
+    "binary_sha256": "a445e597817c0ed28d70878ae0ca59e259e4f9997959121514464556fcfaea83",
+    "image_id": "sha256:0bd07fdc1512626bdb89d048078f986591bdcdac467147ac84e3741364ab9ba6",
     "comparison_sources": {
       "榜上保留的参赛源码": "74806525222aa254135f6a757d646909a917db1d",
       "整表索引失效后重建": "f22c8b13faa4fa9491041fc662e09e908e17571f",

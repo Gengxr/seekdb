@@ -959,20 +959,26 @@ std::vector<float> parse_vector_literal(std::string_view text) {
     for (;;) {
       skip_vector_ws(text, p);
       size_t start = p;
+      const bool negative = p < text.size() && text[p] == '-';
       if (p < text.size() && (text[p] == '-' || text[p] == '+')) ++p;
-      bool any = false;
+      const size_t integer_start = p;
+      uint64_t mantissa = 0;
       while (p < text.size() && std::isdigit((unsigned char)text[p])) {
-        ++p;
-        any = true;
+        mantissa = mantissa * 10 + static_cast<unsigned>(text[p++] - '0');
       }
+      const size_t integer_digits = p - integer_start;
+      size_t fractional_digits = 0;
       if (p < text.size() && text[p] == '.') {
         ++p;
+        const size_t fraction_start = p;
         while (p < text.size() && std::isdigit((unsigned char)text[p])) {
-          ++p;
-          any = true;
+          mantissa = mantissa * 10 + static_cast<unsigned>(text[p++] - '0');
         }
+        fractional_digits = p - fraction_start;
       }
-      if (!any) fail(ErrCode::InvalidVector, "bad vector element");
+      const size_t digits = integer_digits + fractional_digits;
+      if (digits == 0) fail(ErrCode::InvalidVector, "bad vector element");
+      const size_t mantissa_end = p;
       if (p < text.size() && (text[p] == 'e' || text[p] == 'E')) {
         size_t save = p;
         ++p;
@@ -986,7 +992,14 @@ std::vector<float> parse_vector_literal(std::string_view text) {
       const char* num_b = text.data() + start;
       const char* num_e = text.data() + p;
       double val = 0.0;
-      if (!decimal_to_double(num_b, num_e, &val)) {
+      // These digit counts ensure both the mantissa and power of ten are
+      // exactly representable. Reuse the validated digits; longer literals
+      // and scientific notation retain the full conversion and range checks.
+      if (digits <= 15 && p == mantissa_end) {
+        val = static_cast<double>(mantissa);
+        if (fractional_digits) val /= kPow10[fractional_digits];
+        if (negative) val = -val;
+      } else if (!decimal_to_double(num_b, num_e, &val)) {
         fail(ErrCode::InvalidVector, std::string("bad vector element: ") + std::string(num_b, num_e));
       }
       out.push_back(vector_element(val));
