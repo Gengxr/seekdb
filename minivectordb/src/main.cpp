@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -272,15 +273,14 @@ void append_cell(std::string& out, const mvd::Cell& c) {
   char buf[64];
   switch (c.kind) {
     case mvd::Cell::Kind::Int:
-      std::snprintf(buf, sizeof buf, "%lld", (long long)c.i);
-      out += buf;
+      out.append(buf, std::to_chars(buf, buf + sizeof buf, c.i).ptr);
       break;
     case mvd::Cell::Kind::Dbl:
       if (!std::isfinite(c.d)) {
         out += "null";
       } else {
-        std::snprintf(buf, sizeof buf, "%.10g", c.d);
-        out += buf;
+        out.append(buf, std::to_chars(buf, buf + sizeof buf, c.d,
+                                     std::chars_format::general, 10).ptr);
       }
       break;
     case mvd::Cell::Kind::Str:
@@ -294,8 +294,8 @@ void append_cell(std::string& out, const mvd::Cell& c) {
           out += "null";
           continue;
         }
-        std::snprintf(buf, sizeof buf, "%.9g", (double)c.v[i]);
-        out += buf;
+        out.append(buf, std::to_chars(buf, buf + sizeof buf, (double)c.v[i],
+                                     std::chars_format::general, 9).ptr);
       }
       out.push_back(']');
       break;
@@ -460,7 +460,7 @@ int main(int argc, char** argv) {
         }
 
         // Per-request search mode; each case starts in exact mode.
-        exec.execute(req.search_mode == "ann" ? "SET vector_mode = ann" : "SET vector_mode = exact");
+        exec.set_request_mode(req.search_mode == "ann");
 
         std::string sql = prepare_sql(req.sql);
         if (sql.empty()) {

@@ -66,6 +66,7 @@ class Executor {
   ~Executor();
   ResultSet execute(std::string_view sql);
   bool ann_mode() const { return ann_mode_; }
+  void set_request_mode(bool ann) { ann_mode_ = ann; }
 
  private:
   Store& store_;

@@ -11,37 +11,6 @@ namespace mvd {
 namespace {
 
 // ---------------------------------------------------------------- distance
-float l2_sq_scalar(const float* a, const float* b, int n) {
-  float total = 0.0f;
-  for (int i = 0; i < n; ++i) {
-    float d = a[i] - b[i];
-    total += d * d;
-  }
-  return total;
-}
-
-#if defined(__x86_64__) || defined(__i386__)
-__attribute__((target("avx2,fma"))) float l2_sq_avx2(const float* a, const float* b, int n) {
-  __m256 acc = _mm256_setzero_ps();
-  int i = 0;
-  for (; i + 8 <= n; i += 8) {
-    __m256 d = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
-    acc = _mm256_fmadd_ps(d, d, acc);
-  }
-  __m128 lo = _mm256_castps256_ps128(acc);
-  __m128 hi = _mm256_extractf128_ps(acc, 1);
-  __m128 s = _mm_add_ps(lo, hi);
-  s = _mm_hadd_ps(s, s);
-  s = _mm_hadd_ps(s, s);
-  float total = _mm_cvtss_f32(s);
-  for (; i < n; ++i) {
-    float d = a[i] - b[i];
-    total += d * d;
-  }
-  return total;
-}
-#endif
-
 double l2_sq_double(const float* a, const float* b, int n) {
   double total = 0.0;
   for (int i = 0; i < n; ++i) {
@@ -83,21 +52,6 @@ __attribute__((target("avx2,fma"))) double l2_sq_double_avx2(const float* a, con
   return total;
 }
 #endif
-
-using DistFn = float (*)(const float*, const float*, int);
-DistFn g_dist = nullptr;
-
-DistFn pick_distance() {
-#if defined(__x86_64__) || defined(__i386__)
-  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) return l2_sq_avx2;
-#endif
-  return l2_sq_scalar;
-}
-
-inline DistFn dist_fn() {
-  if (!g_dist) g_dist = pick_distance();
-  return g_dist;
-}
 
 using DistFnD = double (*)(const float*, const float*, int);
 DistFnD g_distd = nullptr;
@@ -306,7 +260,13 @@ struct TopKAcc {
 
   bool full() const { return out->size() >= k; }
   double worst() const { return out->back().d2; }
-  float cutoff() const { return (float)(worst() * margin); }
+  float cutoff() const {
+    // Subnormal squared distances have absolute, rather than relative,
+    // float32 rounding error. At that scale only the double kernel can prune.
+    if (worst() < std::numeric_limits<float>::min() * (double)(1u << 16))
+      return std::numeric_limits<float>::infinity();
+    return (float)(worst() * margin);
+  }
 
   void offer(double d2, int64_t pk, uint32_t slot) {
     std::vector<TopKHit>& v = *out;
@@ -532,7 +492,7 @@ bool Executor::ensure_qcache(Table& t) {
   // The copy costs one byte per float, i.e. a quarter of the cached row bytes.
   // Keep it bounded so a huge table degrades to the plain scan instead of
   // trading memory for the peak-RSS metric.
-  if (bytes > (size_t)32 * 1024 * 1024) return false;
+  if (bytes > std::min<size_t>(32u << 20, store_.cache_budget() / 4)) return false;
   if (t.q_valid && t.q_dim == dim && t.qvec.size() == bytes) return true;
 
   t.qvec.assign(bytes, 0);
@@ -551,6 +511,7 @@ bool Executor::ensure_qcache(Table& t) {
   // 100 units at the data maximum, so stored values stay inside [-100, 100]
   // and keep a margin against the int8 range.
   const float step = max_abs / 100.0f;
+  if (!(step > 0.0f) || !std::isfinite(1.0f / step)) return false;
   const float inv = 1.0f / step;
   for (size_t i = 0; i < t.slots.size(); ++i) {
     const Slot& s = t.slots[i];
@@ -935,24 +896,34 @@ ResultSet Executor::exec_select(Stmt& stmt) {
     spec.conds = &conds;
     spec.query = q.data();
     spec.dim = (int32_t)q.size();
-    spec.k = (size_t)limit;
+    if (t.live_rows == 0) return rs;
+    spec.k = std::min<uint64_t>(t.live_rows, (uint64_t)limit);
     // A single equality predicate can be answered from the column's equality
     // index, which visits only the matching slots.  Candidates are re-checked
     // against the row bytes, so a stale index entry can only cost time.
     if (conds.size() == 1 && conds[0].op == CmpOp::Eq) {
       spec.cand = store_.eq_candidates(t, conds[0].col, conds[0].lit);
     }
-    // Screen on the fixed-point copy when it is available: the exact distance
-    // then runs on a handful of candidates instead of every row.  The copy is
-    // strided by the table's declared dimension, so only use it when the query
-    // agrees with that dimension.
-    if (ensure_qcache(t) && t.q_dim == spec.dim) {
-      spec.qvec = t.qvec.data();
-      spec.qstep = t.qstep;
-    }
+    // The packed index returns only candidates. Rank each one using the
+    // original vector. Every other query retains the ordinary exact scan.
     std::vector<TopKHit> best;
-    best.reserve(spec.k);
-    scan_topk(spec, best);
+    best.reserve(std::min<uint64_t>(spec.k, t.live_rows));
+    static thread_local std::vector<uint32_t> survivors;
+    if (conds.empty() && t.packed.candidates(t, spec.query, spec.dim, spec.k,
+                                              store_.cache_budget() / 4, survivors)) {
+      TopKAcc acc{&best, spec.k};
+      for (uint32_t i : survivors) {
+        const Slot& s = t.slots[i];
+        const float* v = (const float*)(spec.arena + s.arena_off + s.vec_rel);
+        acc.offer(l2_sq_double(v, spec.query, spec.dim), s.pk, i);
+      }
+    } else {
+      if (conds.empty() && !t.packed.ready() && ensure_qcache(t) && t.q_dim == spec.dim) {
+        spec.qvec = t.qvec.data();
+        spec.qstep = t.qstep;
+      }
+      scan_topk(spec, best);
+    }
     const char* arena = spec.arena;
     rs.rows.reserve(best.size());
     for (const TopKHit& b : best) {
@@ -991,7 +962,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
 
   std::vector<Cand> heap;
   std::vector<Cand> all;
-  if (use_heap) heap.reserve((size_t)limit + 1);
+  if (use_heap) heap.reserve(std::min<uint64_t>(refs.size(), (uint64_t)limit));
 
   auto push_candidate = [&](Cand&& c) {
     if (use_heap && limit > 0) {
@@ -1010,11 +981,9 @@ ResultSet Executor::exec_select(Stmt& stmt) {
 
   RowView rv;
   if (topk && !refs.empty()) {
-    const int32_t vec_col = items[order_item].col;
     const std::vector<float>& q = items[order_item].query;
     const int dim = (int)q.size();
-    (void)vec_col;
-    DistFn fn = dist_fn();
+    DistFnD fn = dist_fn_double();
     for (const RowRef& r : refs) {
       const char* data;
       uint32_t vec_rel;
@@ -1028,13 +997,13 @@ ResultSet Executor::exec_select(Stmt& stmt) {
         data = o.enc.data();
         vec_rel = o.vec_rel;
       }
-      float sq = fn((const float*)(data + vec_rel), q.data(), dim);
+      double sq = fn((const float*)(data + vec_rel), q.data(), dim);
       Cand c;
       c.pk = pk;
       c.slot = r.slot;
       c.overlay = r.overlay;
       c.key.kind = 1;
-      c.key.d = (double)sq;
+      c.key.d = sq;
       push_candidate(std::move(c));
     }
   } else if (!refs.empty()) {

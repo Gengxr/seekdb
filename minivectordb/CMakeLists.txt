@@ -14,6 +14,7 @@ add_executable(minivectordb
   src/parser.cpp
   src/storage.cpp
   src/exec.cpp
+  src/packed_l2.cpp
 )
 
 target_compile_options(minivectordb PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter)

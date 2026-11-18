@@ -207,13 +207,16 @@ class Lexer {
 
   void read_string(char quote) {
     ++p_;
+    size_t run = p_;
     std::string out;
     while (p_ < s_.size()) {
       char c = s_[p_];
       if (c == quote) {
+        out.append(s_.data() + run, p_ - run);
         if (p_ + 1 < s_.size() && s_[p_ + 1] == quote) {
           out.push_back(quote);
           p_ += 2;
+          run = p_;
           continue;
         }
         ++p_;
@@ -224,6 +227,7 @@ class Lexer {
         return;
       }
       if (c == '\\' && p_ + 1 < s_.size()) {
+        out.append(s_.data() + run, p_ - run);
         char n = s_[p_ + 1];
         switch (n) {
           case 'n': out.push_back('\n'); break;
@@ -236,9 +240,9 @@ class Lexer {
           default: out.push_back(n); break;
         }
         p_ += 2;
+        run = p_;
         continue;
       }
-      out.push_back(c);
       ++p_;
     }
     fail(ErrCode::SyntaxError, "unterminated string literal");

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "mvd.h"
+#include "packed_l2.h"
 
 #include <string>
 #include <vector>
@@ -81,6 +82,7 @@ struct Table {
   std::vector<int8_t> qvec;
   float qstep = 0.0f;  // value of one int8 unit; |v| <= 100 * qstep for stored rows
   bool q_valid = false;
+  PackedL2 packed;
   int32_t q_dim = 0;
 
   int32_t vec_idx() const { return schema.find_vec(); }
