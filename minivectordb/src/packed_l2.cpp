@@ -134,11 +134,14 @@ bool PackedL2::build(const Table& table, int dim, size_t budget) {
 }
 
 bool PackedL2::candidates(const Table& table, const float* query, int dim, size_t k, size_t budget,
+                          const std::vector<uint32_t>* matching,
                           std::vector<uint32_t>& result) {
 #if defined(__x86_64__)
   static const bool disabled = std::getenv("MVD_NO_I8") != nullptr;
   if (disabled || !__builtin_cpu_supports("avx2") || dim < 8 || dim > 4096 ||
       table.live_rows < 256 || k == 0 || k > kTile) return false;
+  if (matching && (matching->size() < k || matching->size() * 12 < table.slots.size()))
+    return false;  // A short equality posting list is cheaper to scan directly.
   if (!valid_ && !build(table, dim, budget)) return false;
 
   static thread_local std::vector<uint32_t> words;
@@ -163,6 +166,13 @@ bool PackedL2::candidates(const Table& table, const float* query, int dim, size_
                                ? scan_vnni : scan_avx2;
   scan(codes_.data(), bias_.data(), words.data(), words.size(), scores.size(), qnorm,
        scores.data(), minima.data());
+  if (matching) {
+    minima.fill(kInvalid);
+    for (size_t i = 0; i < matching->size(); ++i) {
+      int32_t& best = minima[i % kTile];
+      best = std::min(best, scores[(*matching)[i]]);
+    }
+  }
   // The k smallest lane minima belong to distinct rows. Their largest integer
   // distance gives a valid upper bound even when several nearest hits share a lane.
   std::nth_element(minima.begin(), minima.begin() + (k - 1), minima.end());
@@ -175,7 +185,12 @@ bool PackedL2::candidates(const Table& table, const float* query, int dim, size_
   const double radius = (std::sqrt(static_cast<double>(upper)) + 2 * error) * (1 + 1e-12) + 1e-9;
   const int32_t limit = static_cast<int32_t>(std::min<double>(kInvalid - 1, std::ceil(radius * radius)));
   result.clear();
-  collect_within(scores.data(), scores.size(), limit, result);
+  if (matching) {
+    for (uint32_t i : *matching)
+      if (scores[i] <= limit) result.push_back(i);
+  } else {
+    collect_within(scores.data(), scores.size(), limit, result);
+  }
   return true;
 #else
   return false;

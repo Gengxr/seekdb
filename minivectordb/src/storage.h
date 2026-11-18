@@ -64,10 +64,8 @@ struct Table {
 
   // Lazily built equality indexes (one entry per non-vector column).  A scan
   // with one equality predicate can visit only the matching slots instead of
-  // the whole arena.  Entries are appended, never removed, so an updated or
-  // deleted row may leave a stale slot id behind; every candidate is
-  // re-checked against the row bytes, so staleness costs time but never
-  // changes the answer.
+  // the whole arena. Inserts append slot ids, overwrites invalidate the index,
+  // and deleted slots are skipped by both the packed and floating-point scans.
   struct EqIndex {
     bool built = false;
     bool disabled = false;  // high-cardinality column: not worth the memory

@@ -197,6 +197,24 @@ std::vector<Executor::RowRef> Executor::collect_matching(Table& t, const std::ve
   std::vector<RowRef> out;
   const Schema& schema = t.schema;
   const OverlayTable* ov = store_.overlay_for(t);
+  for (const CondPlan& c : conds) {
+    if (c.col != schema.pk_idx || c.op != CmpOp::Eq) continue;
+    const int64_t pk = c.lit.i;
+    const OverlayRow* pending = store_.overlay_find(t, pk);
+    RowRef ref{pk, UINT32_MAX, UINT32_MAX};
+    RowView row;
+    if (pending) {
+      if (pending->deleted) return {};
+      ref.overlay = static_cast<uint32_t>(pending - ov->rows.data());
+      row = {pk, pending->enc.data(), (uint32_t)pending->enc.size(), pending->vec_rel};
+    } else {
+      ref.slot = t.pk_index.find(pk);
+      if (ref.slot == UINT32_MAX || t.slots[ref.slot].dead()) return {};
+      if (conds.size() > 1) store_.read_slot_row(t, t.slots[ref.slot], row);
+    }
+    if (conds.size() == 1 || match_row(schema, conds, pk, row)) out.push_back(ref);
+    return out;
+  }
   out.reserve((size_t)std::min<uint64_t>(t.live_rows, 1u << 20));
   RowView rv;
   for (uint32_t i = 0; i < t.slots.size(); ++i) {
@@ -301,7 +319,7 @@ void Executor::scan_range_generic(const ScanSpec& spec, uint32_t begin, uint32_t
   TopKAcc acc{&out, spec.k};
   const std::vector<Slot>& slots = *spec.slots;
   const char* arena = spec.arena;
-  const bool filtered = !spec.conds->empty();
+  const bool filtered = !spec.cand && !spec.conds->empty();
   const int dim = spec.dim;
   DistFnD fn = dist_fn_double();
   RowView rv;
@@ -379,7 +397,7 @@ void Executor::scan_range_avx2(const ScanSpec& spec, uint32_t begin, uint32_t en
   if (acc.margin < kScreenMargin) acc.margin = kScreenMargin;
   const std::vector<Slot>& slots = *spec.slots;
   const char* arena = spec.arena;
-  const bool filtered = !spec.conds->empty();
+  const bool filtered = !spec.cand && !spec.conds->empty();
   const int dim = spec.dim;
   const float* q = spec.query;
   RowView rv;
@@ -899,8 +917,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
     if (t.live_rows == 0) return rs;
     spec.k = std::min<uint64_t>(t.live_rows, (uint64_t)limit);
     // A single equality predicate can be answered from the column's equality
-    // index, which visits only the matching slots.  Candidates are re-checked
-    // against the row bytes, so a stale index entry can only cost time.
+    // index. Overwrites invalidate it and deleted slots are skipped by the scan.
     if (conds.size() == 1 && conds[0].op == CmpOp::Eq) {
       spec.cand = store_.eq_candidates(t, conds[0].col, conds[0].lit);
     }
@@ -909,8 +926,9 @@ ResultSet Executor::exec_select(Stmt& stmt) {
     std::vector<TopKHit> best;
     best.reserve(std::min<uint64_t>(spec.k, t.live_rows));
     static thread_local std::vector<uint32_t> survivors;
-    if (conds.empty() && t.packed.candidates(t, spec.query, spec.dim, spec.k,
-                                              store_.cache_budget() / 4, survivors)) {
+    if ((conds.empty() || spec.cand) &&
+        t.packed.candidates(t, spec.query, spec.dim, spec.k, store_.cache_budget() / 4,
+                            spec.cand, survivors)) {
       TopKAcc acc{&best, spec.k};
       for (uint32_t i : survivors) {
         const Slot& s = t.slots[i];
@@ -935,8 +953,9 @@ ResultSet Executor::exec_select(Stmt& stmt) {
       for (const ItemPlan& it : items) {
         if (it.hidden) continue;
         if (it.dist) {
-          out.push_back(Cell::dbl(std::sqrt(l2_sq_double((const float*)(row + s.vec_rel), it.query.data(),
-                                                          (int)it.query.size()))));
+          const double d2 = &it == &items[order_item] ? b.d2 :
+              l2_sq_double((const float*)(row + s.vec_rel), it.query.data(), (int)it.query.size());
+          out.push_back(Cell::dbl(std::sqrt(d2)));
           continue;
         }
         Value v = decode_column(schema, it.col, row, len);

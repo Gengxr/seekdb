@@ -4,7 +4,6 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/types.h>
@@ -490,6 +489,7 @@ void Store::read_slot_row(const Table& t, const Slot& s, RowView& out) {
   size_t want = std::max<size_t>(out.len, read_buf_.size());
   if (s.off + want > log_size_) want = (size_t)(log_size_ - s.off);
   if (want < out.len) fail(ErrCode::IoError, "log truncated while reading row");
+  if (read_buf_.size() < want) read_buf_.resize(want);
   if (!read_full(read_fd_, read_buf_.data(), want, s.off)) {
     fail(ErrCode::IoError, "log read failed");
   }
@@ -617,21 +617,24 @@ void Store::apply_delete(Table& t, int64_t pk) {
 
 void Store::replay_log() {
   if (log_size_ == 0) return;
-  const size_t map_len = (size_t)log_size_;
-  void* map = ::mmap(nullptr, map_len, PROT_READ, MAP_PRIVATE, log_fd_, 0);
-  const char* base = nullptr;
-  std::vector<char> fallback;
-  if (map == MAP_FAILED) {
-    fallback.resize(map_len);
-    if (!read_full(log_fd_, fallback.data(), fallback.size(), 0)) fail(ErrCode::IoError, "log read failed");
-    base = fallback.data();
-  } else {
-    base = (const char*)map;
-  }
+  // Coalesce small transactions, but never load an entire multi-transaction
+  // log into the process. A single larger transaction gets its own window.
+  std::vector<char> window;
+  uint64_t window_off = 0;
+  const size_t block = std::clamp<size_t>(cache_budget_ / 16, 64u << 10, 1u << 20);
+  auto read_window = [&](uint64_t pos, size_t size) -> const char* {
+    if (pos < window_off || pos - window_off + size > window.size()) {
+      window_off = pos;
+      window.resize(std::min<uint64_t>(log_size_ - pos, std::max(block, size)));
+      if (!read_full(log_fd_, window.data(), window.size(), pos))
+        fail(ErrCode::IoError, "log read failed");
+    }
+    return window.data() + (pos - window_off);
+  };
   uint64_t valid_end = 0;
   uint64_t off = 0;
   while (off + kRecHeaderSize <= log_size_) {
-    const char* h = base + off;
+    const char* h = read_window(off, kRecHeaderSize);
     uint32_t magic = rd_u32(h);
     if (magic != kRecMagic) break;
     uint16_t version = rd_u16(h + 4);
@@ -639,12 +642,13 @@ void Store::replay_log() {
     uint64_t len = rd_u64(h + 8);
     uint32_t crc = rd_u32(h + 16);
     if (version != kRecVersion || type != kRecTxn) break;
-    if (off + kRecHeaderSize + len > log_size_) break;
-    const char* payload = h + kRecHeaderSize;
+    if (len > log_size_ - off - kRecHeaderSize || len < 4) break;
+    const uint64_t payload_off = off + kRecHeaderSize;
+    const char* payload = read_window(payload_off, len);
     if (crc32_bytes(payload, len) != crc) break;
     // parse payload
-    if (len < 4) break;
     uint32_t nops = rd_u32(payload);
+    if (nops > (len - 4) / 21) break;
     const char* q = payload + 4;
     const char* qend = payload + len;
     bool corrupt = false;
@@ -659,7 +663,7 @@ void Store::replay_log() {
     std::vector<ReplayOp> ops;
     ops.reserve(nops);
     for (uint32_t i = 0; i < nops; ++i) {
-      if (q + 1 + 4 + 8 + 4 + 4 > qend) { corrupt = true; break; }
+      if (qend - q < 21) { corrupt = true; break; }
       ReplayOp op;
       op.op = rd_u8(q);
       op.table = (int32_t)rd_u32(q + 1);
@@ -667,8 +671,8 @@ void Store::replay_log() {
       op.rowlen = rd_u32(q + 13);
       op.vec_rel = rd_u32(q + 17);
       q += 21;
-      op.row_off = (uint64_t)(q - base);
-      if (q + op.rowlen > qend) { corrupt = true; break; }
+      op.row_off = payload_off + (q - payload);
+      if ((uint64_t)(qend - q) < op.rowlen) { corrupt = true; break; }
       q += op.rowlen;
       ops.push_back(op);
     }
@@ -680,7 +684,7 @@ void Store::replay_log() {
       }
       if (!t) continue;
       if (op.op == 1) {
-        apply_put(*t, op.pk, base + op.row_off, op.rowlen, op.vec_rel, op.row_off, true);
+        apply_put(*t, op.pk, payload + (op.row_off - payload_off), op.rowlen, op.vec_rel, op.row_off, true);
       } else if (op.op == 2) {
         apply_delete(*t, op.pk);
       }
@@ -692,7 +696,6 @@ void Store::replay_log() {
     if (::ftruncate(log_fd_, (off_t)valid_end) != 0) fail(ErrCode::IoError, "cannot truncate torn log tail");
     log_size_ = valid_end;
   }
-  if (map != MAP_FAILED) ::munmap(map, map_len);
 }
 
 void Store::build_arenas() {
@@ -718,15 +721,17 @@ void Store::build_arenas() {
       if (s.dead()) continue;
       ensure_buffers();
       uint32_t len = s.len();
-      size_t want = std::max<size_t>(len, read_buf_.size());
-      if (s.off + want > log_size_) want = (size_t)(log_size_ - s.off);
-      if (want < len || !read_full(read_fd_, read_buf_.data(), want, s.off)) {
-        fail(ErrCode::IoError, "log read failed while building cache");
+      if (s.off < read_buf_off_ || s.off + len > read_buf_off_ + read_buf_len_) {
+        size_t want = std::min<uint64_t>(log_size_ - s.off, std::max<size_t>(len, read_buf_.size()));
+        if (read_buf_.size() < want) read_buf_.resize(want);
+        if (want < len || !read_full(read_fd_, read_buf_.data(), want, s.off))
+          fail(ErrCode::IoError, "log read failed while building cache");
+        read_buf_off_ = s.off;
+        read_buf_len_ = want;
       }
-      read_buf_off_ = s.off;
-      read_buf_len_ = want;
       s.arena_off = t->arena.size();
-      t->arena.insert(t->arena.end(), read_buf_.data(), read_buf_.data() + len);
+      const char* row = read_buf_.data() + (s.off - read_buf_off_);
+      t->arena.insert(t->arena.end(), row, row + len);
       t->arena_live += len;
     }
   }

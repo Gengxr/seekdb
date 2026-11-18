@@ -13,6 +13,7 @@ struct Table;
 class PackedL2 {
  public:
   bool candidates(const Table& table, const float* query, int dim, size_t k, size_t budget,
+                  const std::vector<uint32_t>* matching,
                   std::vector<uint32_t>& result);
   void invalidate() { valid_ = false; }
   bool ready() const { return valid_; }
