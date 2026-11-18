@@ -68,7 +68,7 @@
     {
       "role": "tool",
       "method": "按学生提出的行存/列存与向量布局问题，分别记录写入时和已关闭进程重新打开后的内存。120000 行、每行 128 维、缓存预算 16 MiB，核对最后一个主键与重启后 Top5。",
-      "output": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 4.11s, data 65.6 MB, peak rss 29.4 MB, cache budget 16 MB\nrestart: first query 0.1 ms, vector top5 9.7 ms, peak rss 19.5 MB\nresult rows: [[107986, 6.634212207], [81424, 6.672901378], [22758, 6.799585715], [17980, 6.803626502], [62247, 6.823173779]]"
+      "output": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 3.88s, data 65.6 MB, peak rss 29.2 MB, cache budget 16 MB\nrestart: first query 0.3 ms, vector top5 10.1 ms, peak rss 19.5 MB\nresult rows: [[107986, 6.634212207], [81424, 6.672901378], [22758, 6.799585715], [17980, 6.803626502], [62247, 6.823173779]]"
     },
     {
       "role": "tool",
@@ -78,17 +78,17 @@
     {
       "role": "tool",
       "method": "保存自动提交和显式事务的写入耗时，再给已应答行、未提交事务、批量事务和恢复中的进程分别发送 SIGKILL。",
-      "output": "insert {'rows': 20000, 'batch': 100, 'total_s': 19.435, 'rows_per_s': 1029.1, 'median_us': 984.1, 'p95_us': 2010.6}\ntxn_100_rows_s 0.005\nok   all 50 committed rows recovered\nok   uncommitted insert is gone\nok   bulk insert is all-or-nothing (600 rows)\nok   committed transaction survives repeated kill during recovery"
+      "output": "insert {'rows': 20000, 'batch': 100, 'total_s': 19.435, 'rows_per_s': 1029.1, 'median_us': 984.1, 'p95_us': 2010.6}\ntxn_100_rows_s 0.005\nok   all 50 committed rows recovered\nok   uncommitted insert is gone\nok   bulk insert is all-or-nothing (600 rows)\nok   committed transaction survives repeated kill during recovery\n日志校验改为每次处理 8 字节后，另以独立实现逐条验算。两版产生的 25 条记录共 2722 字节，完全一致；载荷覆盖 8 种长度余数，两版互读均可恢复。4 份手动截断或改坏的日志只保留已校验事务，恢复后的追加写入全部通过重启检查。"
     },
     {
       "role": "tool",
       "method": "独立 Python/NumPy 对每次查询先过滤可见行，再按 float64 平方距离、带符号主键排全序。交错更新、删除后复插、回滚、提交、重启。索引条目和真值分别计算。",
-      "output": "10 组维度 8 到 4097；每条计算路径 180 次查询。默认 CPU、强制 AVX2 和关闭整数筛选，共 540 次与独立参考一致。回归样例在同一分类内更新并重插主键，只返回一次；等距时依次返回 -2、7。另在一半含等值过滤的 1000 条查询里比较按过滤结果选路前后，每种条件 6 轮中位数：4 类 59.25 → 34.84 ms，20 类 31.51 → 29.39 ms，100 类 26.51 → 24.67 ms；各组有序应答摘要一致。"
+      "output": "10 组维度 8 到 4097；每条计算路径 180 次查询。默认 CPU、强制 AVX2 和关闭整数筛选，共 540 次与独立参考一致。回归样例在同一分类内更新并重插主键，只返回一次；等距时依次返回 -2、7。另在一半含等值过滤的 1000 条查询里比较按过滤结果选路前后，每种条件 6 轮中位数：4 类 59.25 → 34.84 ms，20 类 31.51 → 29.39 ms，100 类 26.51 → 24.67 ms；各组有序应答摘要一致。\n又为同一低基数列建立分类连续块。最初重排全表使 100 类的 1000 条混合查询变慢（18.72 → 21.26 ms）。修正为保留原表顺序、仅在分类足够大且满足空间预算时创建副本。重新交错测量，前一稳定版与提交版每组各 6 轮：4 类 25.25 → 21.92 ms，20 类 22.89 → 20.52 ms，100 类 19.14 → 18.77 ms。"
     },
     {
       "role": "tool",
       "method": "同一批次、JSONL 串行往返、每个数据集 10000 条 128 维记录和 1000 条 Top10。三组种子各交错执行两轮，一半查询带过滤，查询含近邻扰动及独立随机向量。逐条核对 ID 顺序、距离，再比较各轮输出摘要。",
-      "output": "每版 6 轮，查询耗时中位数 128.81 → 30.04 ms；批写中位数 126.46 → 112.51 ms；首次查询 3.01 → 4.63 ms。每组种子两个版本返回的有序应答摘要一致。"
+      "output": "每版 6 轮，查询耗时中位数 89.67 → 25.02 ms；批写中位数 123.57 → 106.12 ms；首次查询 2.89 → 1.60 ms。每组种子两个版本返回的有序应答摘要一致。\n迁移到单行更新后立即查询的负载。每种情况做 6 次不同的行更新，只计更新后连续读的全过程，独立全量排序逐条核对。前一稳定版与提交版的中位数分别为 1 读 5.21 → 0.98 ms，4 读 5.24 → 1.03 ms，16 读 5.62 → 3.02 ms，128 读 9.88 → 5.47 ms。"
     },
     {
       "role": "tool",
@@ -123,9 +123,9 @@
       ],
       "result_evidence": {
         "pointer": "/experiments/0/output",
-        "quote": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 4.11s, data 65.6 MB, peak rss 29.4 MB, cache budget 16 MB\nrestart: first que"
+        "quote": "前序版本 restart: first query 5.7 ms, vector top5 9.6 ms, peak rss 79.9 MB\n提交版本 write: 120000 rows x 128 dims in 3.88s, data 65.6 MB, peak rss 29.2 MB, cache budget 16 MB\nrestart: first que"
       },
-      "agent_analysis": "向量和标量位于同一条持久化记录，超过行缓存预算的表保留行偏移。恢复改用分段读取，在记录完整并通过 CRC 后应用事务。两版重启后返回的五个 ID 和距离一致，测试进程的峰值 RSS 从 79.9 降至 19.5 MiB。16 MiB 是行缓存预算，官方还会计入容器页缓存。"
+      "agent_analysis": "向量和标量位于同一条持久化记录，超过行缓存预算的表保留行偏移。恢复改用分段读取，在记录完整并通过 CRC 后应用事务。两版重启后返回的五个 ID 和距离一致。16 MiB 是行缓存预算，官方还会计入容器页缓存。"
     },
     {
       "topic": "主键索引与实际查询路径",
@@ -195,7 +195,7 @@
       ],
       "result_evidence": {
         "pointer": "/experiments/4/output",
-        "quote": "每版 6 轮，查询耗时中位数 128.81 → 30.04 ms；批写中位数 126.46 → 112.51 ms；首次查询 3.01 → 4.63 ms。每组种子两个版本返回的有序应答摘要一致。"
+        "quote": "每版 6 轮，查询耗时中位数 89.67 → 25.02 ms；批写中位数 123.57 → 106.12 ms；首次查询 2.89 → 1.60 ms。每组种子两个版本返回的有序应答摘要一致。"
       },
       "agent_analysis": "保留学生选择的粗筛方向，Agent 把向量按 32 行分块，整数距离只用于给出保守候选；按量化残差的三角不等式扩大半径，最后以原 float32 向量计算 double 距离并按主键打破并列。首次建索引有成本。"
     },
@@ -263,5 +263,13 @@
   "limitations": [
     "选项选择与自填回复分别注明。题目隐藏用例、正式工作机负载均不可见。",
     "每个实验列出计时范围。回归测试与服务器性能测量不能代替该提交的赛事结果。"
-  ]
+  ],
+  "version_check": {
+    "role": "tool",
+    "source_commit": "f22c8b13faa4fa9491041fc662e09e908e17571f",
+    "method": "在独立 Ubuntu 24.04 环境由仓库 Dockerfile 构建 amd64 镜像，用官方判题器的容器入口逐项运行公开用例。对比镜像内二进制与源码干净重建的 SHA-256。",
+    "passed_public_cases": 20,
+    "binary_sha256": "786937115f1bb78c7038c398d27e6983ecbd716911607fd2e299bf94dc145e3d",
+    "image_id": "sha256:c638fd38f2508c39a22427f3f26bea5de3e91ecb6002cf943ed110b7f2bbb406"
+  }
 }
