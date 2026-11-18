@@ -17,7 +17,6 @@ class PackedL2 {
                   const std::vector<uint32_t>* matching, int filter_column,
                   std::vector<uint32_t>& result);
   void invalidate() { valid_ = false; seen_column_ = tried_column_ = -1; }
-  void update_slot(const Table& table, uint32_t sid);
   bool ready() const { return valid_; }
   void clear();
   size_t bytes() const;

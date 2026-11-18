@@ -159,36 +159,6 @@ void PackedL2::clear() {
   invalidate();
 }
 
-// A committed row can keep its tile when the original grid still contains
-// it. The certified maximum rounding error may grow. Reassigning the grid or
-// adding another tile requires a rebuild from all current rows.
-void PackedL2::update_slot(const Table& table, uint32_t sid) {
-#if defined(__x86_64__)
-  if (!valid_) return;
-  if (sid >= bias_.size() || !table.cached) {
-    invalidate();
-    return;
-  }
-  if (grouped_column_ >= 0) clear_groups();
-  seen_column_ = tried_column_ = -1;
-  const Slot& s = table.slots[sid];
-  int8_t* dest = codes_.data() + (sid / kTile) * kTile * padded_dim_ + (sid % kTile) * 4;
-  if (s.dead()) {
-    for (size_t j = 0; j < padded_dim_; j += 4) std::memset(dest + j * kTile, 0, 4);
-    bias_[sid] = kInvalid;
-    return;
-  }
-  const int dim = table.schema.cols[table.vec_idx()].len;
-  const char* v = table.arena.data() + s.arena_off + s.vec_rel;
-  if (row_max_abs(v, dim) * inv_step_ > 63.0 + 1e-12) {
-    invalidate();
-    return;
-  }
-  const double error2 = pack_row(v, dim, inv_step_, dest, bias_[sid]);
-  max_error_ = std::max(max_error_, std::sqrt(error2));
-#endif
-}
-
 bool PackedL2::build(const Table& table, int dim, size_t budget) {
 #if defined(__x86_64__)
   const size_t rows = (table.slots.size() + kTile - 1) / kTile * kTile;
