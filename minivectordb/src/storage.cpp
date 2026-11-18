@@ -995,6 +995,8 @@ void Store::compact_log() {
     // Slot ids are reassigned by the replay below, so any cached candidate list
     // would point at the wrong rows.  Drop it and let it rebuild on first use.
     t->eq.clear();
+    t->packed.clear();
+    t->q_valid = false;
   }
   read_buf_off_ = 0;
   read_buf_len_ = 0;

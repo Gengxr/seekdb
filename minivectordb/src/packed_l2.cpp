@@ -63,6 +63,65 @@ MVD_PACKED_SCAN(scan_vnni, "avx2,avxvnni", dot8_vnni)
 #undef MVD_PACKED_SCAN
 
 __attribute__((target("avx2")))
+float row_max_abs(const char* v, int dim) {
+  const __m256 sign = _mm256_set1_ps(-0.0f);
+  __m256 vmax = _mm256_setzero_ps();
+  int j = 0;
+  for (; j + 8 <= dim; j += 8) {
+    const auto x = _mm256_loadu_ps(reinterpret_cast<const float*>(v + 4 * j));
+    vmax = _mm256_max_ps(vmax, _mm256_andnot_ps(sign, x));
+  }
+  alignas(32) float lanes[8];
+  _mm256_store_ps(lanes, vmax);
+  float best = *std::max_element(lanes, lanes + 8);
+  for (; j < dim; ++j) {
+    float x;
+    std::memcpy(&x, v + 4 * j, sizeof x);
+    best = std::max(best, std::fabs(x));
+  }
+  return best;
+}
+
+// Write the four dimension bytes of a row directly into their tile. Rounding
+// ties to either nearest integer is valid because we measure the actual error.
+__attribute__((target("avx2")))
+double pack_row(const char* v, int dim, double inv_step, int8_t* dest, int32_t& bias) {
+  const auto inv = _mm256_set1_pd(inv_step);
+  __m256d errors = _mm256_setzero_pd();
+  __m128i norms = _mm_setzero_si128();
+  int j = 0;
+  for (; j + 4 <= dim; j += 4) {
+    auto x = _mm_loadu_ps(reinterpret_cast<const float*>(v + 4 * j));
+    auto scaled = _mm256_mul_pd(_mm256_cvtps_pd(x), inv);
+    auto grid = _mm256_round_pd(scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    auto residual = _mm256_sub_pd(scaled, grid);
+    errors = _mm256_add_pd(errors, _mm256_mul_pd(residual, residual));
+    auto q = _mm256_cvttpd_epi32(grid);
+    norms = _mm_add_epi32(norms, _mm_add_epi32(_mm_mullo_epi32(q, q), _mm_slli_epi32(q, 8)));
+    auto words = _mm_packs_epi32(q, q);
+    int bytes = _mm_cvtsi128_si32(_mm_packs_epi16(words, words));
+    std::memcpy(dest + (j / 4) * kTile * 4, &bytes, 4);
+  }
+  alignas(32) double err[4];
+  alignas(16) int32_t b[4];
+  _mm256_store_pd(err, errors);
+  _mm_store_si128(reinterpret_cast<__m128i*>(b), norms);
+  bias = b[0] + b[1] + b[2] + b[3];
+  double error2 = (err[0] + err[1]) + (err[2] + err[3]);
+  for (int lane = 0; j < dim; ++j, ++lane) {
+    float x;
+    std::memcpy(&x, v + 4 * j, sizeof x);
+    const double scaled = x * inv_step;
+    const int q = static_cast<int>(std::round(scaled));
+    dest[(j / 4) * kTile * 4 + lane] = static_cast<int8_t>(q);
+    bias += q * q + 256 * q;
+    const double residual = scaled - q;
+    error2 += residual * residual;
+  }
+  return error2;
+}
+
+__attribute__((target("avx2")))
 void collect_within(const int32_t* scores, size_t rows, int32_t limit,
                     std::vector<uint32_t>& result) {
   const __m256i exclusive = _mm256_set1_epi32(limit + 1);
@@ -80,31 +139,40 @@ void collect_within(const int32_t* scores, size_t rows, int32_t limit,
 }  // namespace
 
 size_t PackedL2::bytes() const {
-  return codes_.capacity() + bias_.capacity() * sizeof(int32_t);
+  return codes_.capacity() + grouped_codes_.capacity() +
+         (bias_.capacity() + grouped_bias_.capacity() + slot_ids_.capacity()) * sizeof(uint32_t) +
+         ranges_.bucket_count() * sizeof(void*) + ranges_.size() * (sizeof(TileRange) + 3 * sizeof(void*));
+}
+
+void PackedL2::clear_groups() {
+  std::vector<int8_t>().swap(grouped_codes_);
+  std::vector<int32_t>().swap(grouped_bias_);
+  std::vector<uint32_t>().swap(slot_ids_);
+  decltype(ranges_)().swap(ranges_);
+  grouped_column_ = -1;
 }
 
 void PackedL2::clear() {
   std::vector<int8_t>().swap(codes_);
   std::vector<int32_t>().swap(bias_);
-  valid_ = false;
+  clear_groups();
+  invalidate();
 }
 
 bool PackedL2::build(const Table& table, int dim, size_t budget) {
+#if defined(__x86_64__)
   const size_t rows = (table.slots.size() + kTile - 1) / kTile * kTile;
   padded_dim_ = (static_cast<size_t>(dim) + 3) & ~size_t(3);
   if (rows > std::min(kMaxBytes, budget) / (padded_dim_ + 2 * sizeof(int32_t))) return false;
-  double max_abs = 0;
+  if (grouped_column_ >= 0) clear_groups();
+  float max_abs = 0;
   for (const Slot& s : table.slots) {
     if (s.dead()) continue;
     const char* v = table.arena.data() + s.arena_off + s.vec_rel;
-    for (int j = 0; j < dim; ++j) {
-      float x;
-      std::memcpy(&x, v + 4 * j, sizeof x);
-      max_abs = std::max(max_abs, std::fabs(static_cast<double>(x)));
-    }
+    max_abs = std::max(max_abs, row_max_abs(v, dim));
   }
   // Double grid arithmetic also handles subnormal and maximum finite floats.
-  step_ = max_abs == 0 ? 1.0 : max_abs / 63.0;
+  inv_step_ = max_abs == 0 ? 1.0 : 63.0 / static_cast<double>(max_abs);
   max_error_ = 0;
   codes_.assign(rows * padded_dim_, 0);
   bias_.assign(rows, kInvalid);
@@ -112,37 +180,95 @@ bool PackedL2::build(const Table& table, int dim, size_t budget) {
     const Slot& s = table.slots[i];
     if (s.dead()) continue;
     const char* v = table.arena.data() + s.arena_off + s.vec_rel;
-    int32_t b = 0;
-    double error2 = 0;
-    int8_t* tile = codes_.data() + (i / kTile) * kTile * padded_dim_;
-    for (int j = 0; j < dim; ++j) {
-      float x;
-      std::memcpy(&x, v + 4 * j, sizeof x);
-      const double scaled = static_cast<double>(x) / step_;
-      const int r = static_cast<int>(std::round(scaled));
-      tile[(j / 4) * kTile * 4 + (i % kTile) * 4 + (j % 4)] = static_cast<int8_t>(r);
-      b += r * r + 256 * r;
-      const double residual = scaled - r;
-      error2 += residual * residual;
-    }
-    bias_[i] = b;
+    int8_t* dest = codes_.data() + (i / kTile) * kTile * padded_dim_ + (i % kTile) * 4;
+    double error2 = pack_row(v, dim, inv_step_, dest, bias_[i]);
     max_error_ = std::max(max_error_, error2);
   }
   max_error_ = std::sqrt(max_error_);
   valid_ = true;
   return true;
+#else
+  return false;
+#endif
+}
+
+// After repeated use of a low-cardinality equality column, put its postings
+// in contiguous tiles. A filtered query then reads just its own range. Plain
+// scans keep their original physical order and do not access the extra copy.
+void PackedL2::group_by_column(const Table& table, int column, size_t budget) {
+  const auto& index = table.eq.at(static_cast<size_t>(column));
+  const size_t groups = index.by_int.size() + index.by_str.size();
+  if (!index.built || index.disabled || groups < 2 || groups > table.live_rows / 192) return;
+  auto align_tile = [](size_t n) { return (n + kTile - 1) / kTile * kTile; };
+  size_t padded = 0;
+  for (const auto& entry : index.by_int) padded += align_tile(entry.second.size());
+  for (const auto& entry : index.by_str) padded += align_tile(entry.second.size());
+  const size_t cap = std::min(kMaxBytes, budget);
+  const size_t existing = bytes() + groups * 64;
+  if (existing >= cap || padded > (cap - existing) / (padded_dim_ + 3 * sizeof(int32_t))) return;
+  std::vector<int8_t> codes(padded * padded_dim_, 0);
+  std::vector<int32_t> bias(padded, kInvalid);
+  std::vector<uint32_t> slots(padded);
+  decltype(ranges_) ranges;
+  ranges.reserve(groups);
+  size_t begin = 0, live = 0;
+  auto pack_postings = [&](const auto& buckets) {
+    for (const auto& entry : buckets) {
+      const auto& ids = entry.second;
+      if (ids.empty()) continue;
+      const size_t count = align_tile(ids.size());
+      ranges.emplace(ids.front(), TileRange{begin, count});
+      for (size_t j = 0; j < ids.size(); ++j) {
+        const size_t sid = ids[j], pos = begin + j;
+        if (table.slots[sid].dead()) continue;
+        ++live;
+        slots[pos] = static_cast<uint32_t>(sid);
+        bias[pos] = bias_[sid];
+        const size_t src = (sid / kTile) * kTile * padded_dim_ + (sid % kTile) * 4;
+        const size_t dst = (pos / kTile) * kTile * padded_dim_ + (pos % kTile) * 4;
+        for (size_t d = 0; d < padded_dim_; d += 4)
+          std::memcpy(codes.data() + dst + d * kTile, codes_.data() + src + d * kTile, 4);
+      }
+      begin += count;
+    }
+  };
+  pack_postings(index.by_int);
+  pack_postings(index.by_str);
+  if (live != table.live_rows) return;
+  grouped_codes_.swap(codes);
+  grouped_bias_.swap(bias);
+  slot_ids_.swap(slots);
+  ranges_.swap(ranges);
+  grouped_column_ = column;
 }
 
 bool PackedL2::candidates(const Table& table, const float* query, int dim, size_t k, size_t budget,
-                          const std::vector<uint32_t>* matching,
+                          const std::vector<uint32_t>* matching, int filter_column,
                           std::vector<uint32_t>& result) {
 #if defined(__x86_64__)
   static const bool disabled = std::getenv("MVD_NO_I8") != nullptr;
   if (disabled || !__builtin_cpu_supports("avx2") || dim < 8 || dim > 4096 ||
       table.live_rows < 256 || k == 0 || k > kTile) return false;
-  if (matching && (matching->size() < k || matching->size() * 12 < table.slots.size()))
-    return false;  // A short equality posting list is cheaper to scan directly.
+  if (matching && matching->size() < k) return false;
+  const bool repeated = matching && seen_column_ == filter_column && tried_column_ != filter_column;
+  if (matching) seen_column_ = filter_column;
+  const bool sparse = matching && matching->size() * 12 < table.slots.size();
+  if (!valid_ && sparse && !repeated) return false;
   if (!valid_ && !build(table, dim, budget)) return false;
+  if (repeated && grouped_column_ < 0) {
+    tried_column_ = filter_column;
+    group_by_column(table, filter_column, budget);
+  }
+  TileRange range{0, bias_.size()};
+  const bool use_group = matching && filter_column == grouped_column_;
+  if (use_group) {
+    const auto it = ranges_.find(matching->front());
+    if (it == ranges_.end()) return false;
+    range = it->second;
+    matching = nullptr;  // Every live row in this range already satisfies the predicate.
+  } else if (sparse) {
+    return false;
+  }
 
   static thread_local std::vector<uint32_t> words;
   words.assign(padded_dim_ / 4, 0x80808080u);
@@ -150,7 +276,7 @@ bool PackedL2::candidates(const Table& table, const float* query, int dim, size_
   int qnorm = 0;
   double error2 = 0;
   for (int j = 0; j < dim; ++j) {
-    const double scaled = static_cast<double>(query[j]) / step_;
+    const double scaled = static_cast<double>(query[j]) * inv_step_;
     if (std::fabs(scaled) > 126.0) return false;
     const int q = static_cast<int>(std::round(scaled));
     bytes[j] = static_cast<uint8_t>(q + 128);
@@ -160,11 +286,14 @@ bool PackedL2::candidates(const Table& table, const float* query, int dim, size_
   }
 
   static thread_local std::vector<int32_t> scores;
-  scores.resize(bias_.size());
+  scores.resize(range.count);
   std::array<int32_t, kTile> minima;
   static const auto scan = __builtin_cpu_supports("avxvnni") && !std::getenv("MVD_NO_VNNI")
                                ? scan_vnni : scan_avx2;
-  scan(codes_.data(), bias_.data(), words.data(), words.size(), scores.size(), qnorm,
+  const auto& codes = use_group ? grouped_codes_ : codes_;
+  const auto& bias = use_group ? grouped_bias_ : bias_;
+  scan(codes.data() + range.begin * padded_dim_, bias.data() + range.begin,
+       words.data(), words.size(), scores.size(), qnorm,
        scores.data(), minima.data());
   if (matching) {
     minima.fill(kInvalid);
@@ -190,6 +319,8 @@ bool PackedL2::candidates(const Table& table, const float* query, int dim, size_
       if (scores[i] <= limit) result.push_back(i);
   } else {
     collect_within(scores.data(), scores.size(), limit, result);
+    if (use_group)
+      for (auto& i : result) i = slot_ids_[range.begin + i];
   }
   return true;
 #else

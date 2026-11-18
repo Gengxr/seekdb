@@ -928,7 +928,7 @@ ResultSet Executor::exec_select(Stmt& stmt) {
     static thread_local std::vector<uint32_t> survivors;
     if ((conds.empty() || spec.cand) &&
         t.packed.candidates(t, spec.query, spec.dim, spec.k, store_.cache_budget() / 4,
-                            spec.cand, survivors)) {
+                            spec.cand, spec.cand ? conds.front().col : -1, survivors)) {
       TopKAcc acc{&best, spec.k};
       for (uint32_t i : survivors) {
         const Slot& s = t.slots[i];

@@ -1,6 +1,7 @@
 // SQL lexer + recursive-descent parser for the MiniVectorDB subset.
 #include "mvd.h"
 
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <charconv>
@@ -106,19 +107,32 @@ int64_t now_nanos() {
 }
 
 uint32_t crc32_bytes(const void* data, size_t len) {
-  static uint32_t table[256];
-  static bool init = false;
-  if (!init) {
+  // Eight IEEE CRC tables let independent byte lookups overlap. Existing log
+  // records keep the same polynomial, seed and final complement.
+  static const auto table = [] {
+    std::array<std::array<uint32_t, 256>, 8> t{};
     for (uint32_t i = 0; i < 256; ++i) {
       uint32_t c = i;
       for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-      table[i] = c;
+      t[0][i] = c;
     }
-    init = true;
-  }
-  const unsigned char* p = (const unsigned char*)data;
+    for (size_t n = 1; n < t.size(); ++n)
+      for (size_t i = 0; i < 256; ++i) {
+        uint32_t c = t[n - 1][i];
+        t[n][i] = t[0][c & 255] ^ (c >> 8);
+      }
+    return t;
+  }();
+  const auto* p = static_cast<const unsigned char*>(data);
   uint32_t c = 0xFFFFFFFFu;
-  for (size_t i = 0; i < len; ++i) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+  while (len >= 8) {
+    c = table[7][(c ^ p[0]) & 255] ^ table[6][((c >> 8) ^ p[1]) & 255] ^
+        table[5][((c >> 16) ^ p[2]) & 255] ^ table[4][(c >> 24) ^ p[3]] ^
+        table[3][p[4]] ^ table[2][p[5]] ^ table[1][p[6]] ^ table[0][p[7]];
+    p += 8;
+    len -= 8;
+  }
+  for (size_t i = 0; i < len; ++i) c = table[0][(c ^ p[i]) & 255] ^ (c >> 8);
   return c ^ 0xFFFFFFFFu;
 }
 
